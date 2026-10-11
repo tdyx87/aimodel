@@ -71,6 +71,11 @@ if (AIMODEL_BUILD_TOOLS)
     # docs/design/http-ui.md 第 4 节：产品入口（本地服务 + 打开浏览器）
     add_executable(system_info_ui tools/system_info_ui.cpp)
     target_link_libraries(system_info_ui PRIVATE aimodel)
+
+    # 界面为免构建静态资源（web/），随可执行文件就位，双击即可打开
+    add_custom_command(TARGET system_info_ui POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_CURRENT_SOURCE_DIR}/web $<TARGET_FILE_DIR:system_info_ui>/web)
 endif ()
 
 # ---- 测试（GTest 固定版本，agents.md 第 8.4 条）----

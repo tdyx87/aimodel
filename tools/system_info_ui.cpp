@@ -32,7 +32,7 @@ void PrintHelp(const char* prog) {
                 "选项：\n"
                 "  --port N       监听端口（默认 0 = 系统分配，启动后打印真实端口）\n"
                 "  --no-open      启动后不自动打开浏览器\n"
-                "  --web-root DIR 静态资源目录（默认：与可执行文件同级的 web/dist）\n"
+                "  --web-root DIR 静态资源目录（默认：与可执行文件同级的 web）\n"
                 "  --help         显示本帮助\n");
 }
 
@@ -41,7 +41,7 @@ void PrintHelp(const char* prog) {
 int main(int argc, char* argv[]) {
     int port = 0;
     bool no_open = false;
-    std::string web_root = "web/dist";
+    std::string web_root = "web";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
