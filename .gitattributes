@@ -1,0 +1,7 @@
+# 统一 LF 换行（agents.md 7.2）；Windows 脚本保留 CRLF 以便直接执行
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.ico binary

@@ -1,0 +1,51 @@
+# Build outputs
+build/
+out/
+dist/
+cmake-build-*/
+
+# C/C++ objects
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.pdb
+*.ilk
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Frontend
+node_modules/
+web/dist/
+web/.vite/
+coverage/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Misc
+*.log
+.DS_Store
+.env
+.env.local
