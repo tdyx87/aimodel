@@ -13,9 +13,11 @@ $BuildDir = Join-Path $Root "build"
 $tests = if ($NoTests) { "OFF" } else { "ON" }
 
 # MSVC 环境优先；回退到已安装的生成器（如 Ninja/MinGW）
+# 用 $() 显式取值：避免某些 PowerShell 宿主把 "-DX=$Var" 原样传给 cmake
+# （曾导致 CMAKE_BUILD_TYPE 落盘为字面量 "$Config"，ninja 规则名非法而无法构建）
 cmake -S $Root -B $BuildDir `
-    -DCMAKE_BUILD_TYPE=$Config `
-    -DAIMODEL_BUILD_TESTS=$tests
+    "-DCMAKE_BUILD_TYPE=$($Config)" `
+    "-DAIMODEL_BUILD_TESTS=$($tests)"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 cmake --build $BuildDir --config $Config --parallel
