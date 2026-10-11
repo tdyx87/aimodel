@@ -48,9 +48,13 @@ bool SanitizeStaticPath(const std::string& raw, std::string* rel) {
     if (q != std::string::npos) {
         path = path.substr(0, q);
     }
-    if (!UrlDecode(path, &path)) {
+    // 解码结果须写入独立变量：UrlDecode 会先 clear 输出，
+    // 与输入共用同一对象会把待解码内容清空（曾导致所有静态资源 404）。
+    std::string decoded;
+    if (!UrlDecode(path, &decoded)) {
         return false;
     }
+    path = decoded;
     if (path.empty() || path[0] != '/' || path.size() > 1024) {
         return false;
     }
@@ -199,7 +203,7 @@ std::string HandleRequest(const std::string& method, const std::string& raw_path
                 404, "Not Found", "text/html; charset=utf-8",
                 ErrorPage(404, "界面资源缺失",
                           "未找到界面资源，可能是安装不完整，请重新安装 aimodel。"
-                          "（开发者提示：请先构建前端 cd web 然后 npm install 与 npm run build）"));
+                          "（开发者提示：界面资源目录 web 需与可执行文件同级）"));
         }
         return BuildResponse(404, "Not Found", "text/html; charset=utf-8",
                              ErrorPage(404, "页面不存在", "未找到请求的页面。"));
