@@ -67,6 +67,10 @@ endif ()
 if (AIMODEL_BUILD_TOOLS)
     add_executable(system_info_cli tools/system_info_cli.cpp)
     target_link_libraries(system_info_cli PRIVATE aimodel)
+
+    # docs/design/http-ui.md 第 4 节：产品入口（本地服务 + 打开浏览器）
+    add_executable(system_info_ui tools/system_info_ui.cpp)
+    target_link_libraries(system_info_ui PRIVATE aimodel)
 endif ()
 
 # ---- 测试（GTest 固定版本，agents.md 第 8.4 条）----
