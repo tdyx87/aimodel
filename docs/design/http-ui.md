@@ -72,7 +72,11 @@ public:
 
 ## 3. 前端契约（frontend-implementer）
 
-- 栈：React 18 + TypeScript + Vite；`base: './'`；产物 `web/dist/`；**零 CDN、零运行时外部请求**。
+- 栈：**原生静态页**（`web/index.html` + `web/app.js` + `web/styles.css`），**无构建步骤、无 Node 依赖**。
+  理由：产品需离线可用且安装即用；界面只消费一个本地接口，引入 npm/打包链会带来网络依赖与构建门禁成本，收益不匹配。
+  若日后界面复杂度显著上升，可再评估引入构建工具（届时须保持 `base: './'` 与零 CDN 约束）。
+- 要求：**零 CDN、零运行时外部请求**、零外部字体（系统字体栈）。
+- 产物即源码：`web/` 由 CMake 在 `system_info_ui` 构建后复制到可执行文件同级目录（`--web-root` 默认值 `web`）。
 - 数据源：`GET /api/system-info`（同源），类型定义与 `system_info.h` 字段一一对应：
   `{ os_name, os_version, architecture, hostname, cpus[{vendor,brand,core_count,physical_core_count,frequency_mhz}], gpus[{vendor,name,video_memory_bytes}], memory{total_bytes,available_bytes}, disks[{mount_point,file_system,total_bytes,free_bytes}], printers[{name,is_default,status}] }`
 - 状态决策（对界面稿的裁决）：**单请求整体加载**——失败 → 全局错误态（含重试）；字段为空数组 → 该卡片空态；**不实现块级重试**（本机毫秒级响应，块级重试收益低、复杂度高）。
@@ -83,5 +87,5 @@ public:
 | 目标 | 说明 |
 |------|------|
 | `system_info_cli` | 开发者/脚本用（保留，移入 README 开发者区块） |
-| `system_info_ui` | **产品入口**：起服务 + 打开浏览器；参数 `--port N`、`--no-open`、`--web-root <dir>` |
-| `web`（CMake 自定义目标） | `npm run build` 产物到 `web/dist` |
+| `system_info_ui` | **产品入口**：起服务 + 打开浏览器；参数 `--port N`、`--no-open`、`--web-root <dir>`（默认 `web`） |
+| `web/`（静态资源） | 免构建静态页，构建后复制到可执行文件同级；无 npm/CMake 目标 |
