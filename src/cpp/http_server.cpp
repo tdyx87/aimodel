@@ -102,6 +102,7 @@ namespace {
 
 // 用户语言错误页（不暴露技术细节，agents.md 设计原则）。
 std::string ErrorPage(int status, const std::string& title, const std::string& message) {
+    (void)status;  // 错误页对用户只呈现语义文案，不展示状态码等技术细节
     std::ostringstream os;
     os << "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
        << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -219,7 +220,7 @@ struct LocalServer::Impl {
     Impl() : running(false), bound_port(0) {}
 
     void Run();  // accept 循环（平台无关，仅调用 Net* 抽象）
-}
+};
 
 void LocalServer::Impl::Run() {
     while (!net.stopping.load()) {
