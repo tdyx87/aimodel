@@ -14,14 +14,13 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
-#include <fstream>
-#include <sstream>
 #include <string>
 #include <vector>
 
 #if defined(_WIN32) || defined(_WIN64)
 #  include <direct.h>
 #  include <io.h>
+#  include <wchar.h>
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
 #else
@@ -48,6 +47,42 @@ FileTransfer::FileTransfer(const std::string& uploads_root)
     : uploads_root_(uploads_root.empty() ? "data/uploads" : uploads_root) {}
 
 namespace {
+
+#if defined(_WIN32) || defined(_WIN64)
+
+// UTF-8（本库对外统一编码）→ UTF-16（Win32 宽字符 API 所需）。
+//
+// 为什么必须转换：Windows 的 ANSI 文件 API（CreateFileA / _mkdir / _stat /
+// _findfirst）按**系统代码页**（简中为 GBK/936）解释路径。直接把 UTF-8 字节喂进去，
+// 会出现两类错误：
+//   1) UTF-8 字节恰是合法 GBK → 落盘文件名乱码（如「硬件报告.txt」→「纭欢鎶ュ憡.txt」）；
+//   2) UTF-8 字节不是合法 GBK → 创建直接失败（中文名上传报 WRITE_FAILED）。
+// 故路径一律经本函数转宽字符，改走 W 系列 API。
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    const int size = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                           static_cast<int>(s.size()), NULL, 0);
+    if (size <= 0) return std::wstring();
+    std::wstring out(static_cast<size_t>(size), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+                          &out[0], size);
+    return out;
+}
+
+// UTF-16 → UTF-8（列目录时把文件名转回对外编码）。
+std::string WideToUtf8Local(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    const int size = ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                           static_cast<int>(w.size()), NULL, 0,
+                                           NULL, NULL);
+    if (size <= 0) return std::string();
+    std::string out(static_cast<size_t>(size), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                          &out[0], size, NULL, NULL);
+    return out;
+}
+
+#endif  // _WIN32
 
 bool IsPathSeparator(char c) {
 #if defined(_WIN32) || defined(_WIN64)
@@ -107,33 +142,62 @@ std::string JoinPath(const std::string& root, const std::string& name) {
     return out;
 }
 
-// 平台封装：存在性判断与目录判断。Windows 用 _stat 避开 stat 名冲突
-// （MinGW 会把 _stat 宏映射到 _stat64i32，故只写 _stat，由平台头自行解析）。
-#if defined(_WIN32) || defined(_WIN64)
-#  define AIMODEL_STAT(path, out) ::_stat((path), (out))
-typedef struct _stat aimodel_stat_t;
-#else
-#  define AIMODEL_STAT(path, out) ::stat((path), (out))
-typedef struct stat aimodel_stat_t;
-#endif
-
+// 平台封装：存在性判断与目录判断。
+// Windows 走 GetFileAttributesW（UTF-16 路径），避免 ANSI 代码页误判中文路径；
+// POSIX 用 stat（路径本就是 UTF-8 字节流）。
 bool PathExists(const std::string& path) {
-    aimodel_stat_t st;
-    return AIMODEL_STAT(path.c_str(), &st) == 0;
+#if defined(_WIN32) || defined(_WIN64)
+    const std::wstring w = Utf8ToWide(path);
+    return !w.empty() &&
+           ::GetFileAttributesW(w.c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0;
+#endif
 }
 
 bool IsDirectory(const std::string& path) {
-    aimodel_stat_t st;
-    if (AIMODEL_STAT(path.c_str(), &st) != 0) return false;
+#if defined(_WIN32) || defined(_WIN64)
+    const std::wstring w = Utf8ToWide(path);
+    if (w.empty()) return false;
+    const DWORD attr = ::GetFileAttributesW(w.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES &&
+           (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) return false;
     return (st.st_mode & S_IFMT) == S_IFDIR;
+#endif
 }
 
 // 单层建目录。
 bool MakeSingleDirectory(const std::string& path) {
 #if defined(_WIN32) || defined(_WIN64)
-    return ::_mkdir(path.c_str()) == 0;
+    const std::wstring w = Utf8ToWide(path);
+    return !w.empty() && ::_wmkdir(w.c_str()) == 0;
 #else
     return ::mkdir(path.c_str(), 0755) == 0;
+#endif
+}
+
+// 以二进制只读打开文件（Windows 走宽字符 API，避免中文路径被按 ANSI 解释）。
+std::FILE* OpenReadBinary(const std::string& path) {
+#if defined(_WIN32) || defined(_WIN64)
+    const std::wstring w = Utf8ToWide(path);
+    if (w.empty()) return NULL;
+    return ::_wfopen(w.c_str(), L"rb");
+#else
+    return std::fopen(path.c_str(), "rb");
+#endif
+}
+
+// 删除文件（Windows 走宽字符 API）。
+int RemoveFile(const std::string& path) {
+#if defined(_WIN32) || defined(_WIN64)
+    const std::wstring w = Utf8ToWide(path);
+    return w.empty() ? -1 : ::_wremove(w.c_str());
+#else
+    return std::remove(path.c_str());
 #endif
 }
 
@@ -144,7 +208,11 @@ bool MakeSingleDirectory(const std::string& path) {
 int CreateFileExclusiveAndWrite(const std::string& path,
                                 const std::string& content) {
 #if defined(_WIN32) || defined(_WIN64)
-    HANDLE h = ::CreateFileA(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW,
+    // 宽字符路径（CreateFileW）：中文文件名若走 CreateFileA 会按 ANSI 代码页解释
+    // UTF-8 字节，导致乱码或创建失败（WRITE_FAILED）。
+    const std::wstring wpath = Utf8ToWide(path);
+    if (wpath.empty()) return -1;
+    HANDLE h = ::CreateFileW(wpath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW,
                              FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD e = ::GetLastError();
@@ -551,22 +619,27 @@ bool FileTransfer::ListUploads(std::string* list,
 
     std::vector<std::string> files;
 #if defined(_WIN32) || defined(_WIN64)
-    const std::string pattern = JoinPath(uploads_root_, "*");
-    struct _finddata_t fd;
-    const intptr_t handle = ::_findfirst(pattern.c_str(), &fd);
-    if (handle == -1) {
+    // 宽字符枚举（FindFirstFileW）：中文文件名经 ANSI 版 _findfirst 会乱码。
+    const std::wstring pattern = Utf8ToWide(JoinPath(uploads_root_, "*"));
+    if (pattern.empty()) {
+        if (error != nullptr) *error = "读取上传目录失败。";
+        if (code != nullptr) *code = FileError::kInternal;
+        return false;
+    }
+    WIN32_FIND_DATAW fd;
+    HANDLE handle = ::FindFirstFileW(pattern.c_str(), &fd);
+    if (handle == INVALID_HANDLE_VALUE) {
+        // 目录存在但为空时 FindFirstFileW 报 ERROR_FILE_NOT_FOUND：视为空列表而非错误。
+        if (::GetLastError() == ERROR_FILE_NOT_FOUND) return true;
         if (error != nullptr) *error = "读取上传目录失败。";
         if (code != nullptr) *code = FileError::kInternal;
         return false;
     }
     do {
-        if ((fd.attrib & _A_SUBDIR) != 0) continue;
-        if (std::strcmp(fd.name, ".") == 0 || std::strcmp(fd.name, "..") == 0) {
-            continue;
-        }
-        files.push_back(fd.name);
-    } while (::_findnext(handle, &fd) == 0);
-    ::_findclose(handle);
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        files.push_back(WideToUtf8Local(fd.cFileName));
+    } while (::FindNextFileW(handle, &fd) != 0);
+    ::FindClose(handle);
 #else
     DIR* dir = ::opendir(uploads_root_.c_str());
     if (dir == nullptr) {
@@ -634,21 +707,27 @@ bool FileTransfer::ReadUpload(const std::string& filename,
         return false;
     }
 
-    std::ifstream in(full_path.c_str(), std::ios::binary);
-    if (!in.is_open()) {
+    // 二进制读取（Windows 走 _wfopen，避免中文路径被按 ANSI 代码页解释而读不到）。
+    std::FILE* fp = OpenReadBinary(full_path);
+    if (fp == NULL) {
         if (error != nullptr) *error = "文件不存在。";
         if (code != nullptr) *code = FileError::kNotFound;
         return false;
     }
-
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    if (in.bad()) {
+    std::string data;
+    char buf[8192];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), fp)) > 0) {
+        data.append(buf, n);
+    }
+    const bool read_error = std::ferror(fp) != 0;
+    std::fclose(fp);
+    if (read_error) {
         if (error != nullptr) *error = "读取文件失败。";
         if (code != nullptr) *code = FileError::kInternal;
         return false;
     }
-    *content = ss.str();
+    *content = data;
     return true;
 }
 
@@ -685,7 +764,7 @@ bool FileTransfer::RemoveUpload(const std::string& filename,
         return false;
     }
 
-    if (std::remove(full_path.c_str()) != 0) {
+    if (RemoveFile(full_path) != 0) {
         if (error != nullptr) *error = "删除文件失败。";
         if (code != nullptr) *code = FileError::kWriteFailed;
         return false;

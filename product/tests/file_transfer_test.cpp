@@ -184,6 +184,41 @@ TEST(FileTransferTest, AcceptsNonAsciiFilenames) {
     EXPECT_EQ(content, std::string("x"));
 }
 
+TEST(FileTransferTest, HandlesNonAsciiFilenamesOnDisk) {
+    // 回归：Windows 曾用 ANSI 文件 API（CreateFileA/_mkdir/_findfirst）处理 UTF-8 路径，
+    // 被按系统代码页（简中 GBK/936）解释，导致：
+    //   - 部分中文名（UTF-8 字节非合法 GBK）上传直接失败（WRITE_FAILED），如「中文名.txt」；
+    //   - 其余中文名虽成功但落盘乱码（「硬件报告.txt」→「纭欢鎶ュ憡.txt」）。
+    // 修复后统一走宽字符 API，以下断言应全部成立。
+    const std::string root = MakeTempRoot("cn");
+    aimodel::FileTransfer ft(root);
+    std::string error;
+    std::string saved;
+
+    const char* names[] = {"中文名.txt", "硬件报告.txt", "测试.txt", "模型推荐.txt"};
+    const size_t count = sizeof(names) / sizeof(names[0]);
+
+    for (size_t i = 0; i < count; ++i) {
+        saved.clear();
+        ASSERT_TRUE(ft.AppendUpload(names[i], "content", &error, &saved)) << names[i];
+        EXPECT_EQ(saved, std::string(names[i])) << names[i];
+    }
+
+    // 列目录应原样返回中文名（旧实现经 ANSI 枚举会乱码）。
+    std::string list;
+    ASSERT_TRUE(ft.ListUploads(&list, &error));
+    for (size_t i = 0; i < count; ++i) {
+        EXPECT_NE(list.find(names[i]), std::string::npos) << names[i];
+    }
+
+    // 读回内容一致。
+    for (size_t i = 0; i < count; ++i) {
+        std::string content;
+        ASSERT_TRUE(ft.ReadUpload(names[i], &content, &error)) << names[i];
+        EXPECT_EQ(content, std::string("content"));
+    }
+}
+
 TEST(FileTransferTest, MissingDirectoryListsAsEmpty) {
     const std::string root = MakeTempRoot("empty");
     aimodel::FileTransfer ft(root);
