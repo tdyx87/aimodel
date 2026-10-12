@@ -83,10 +83,29 @@ if (AIMODEL_BUILD_TOOLS)
     target_link_libraries(system_info_ui PRIVATE aimodel)
     target_compile_options(system_info_ui PRIVATE ${AIMODEL_WARN_FLAGS})
 
-    # 界面为免构建静态资源（web/），随可执行文件就位，双击即可打开
-    add_custom_command(TARGET system_info_ui POST_BUILD
+    # 界面为免构建静态资源（web/），随可执行文件就位，双击即可打开。
+    #
+    # 为什么不能只用 POST_BUILD 的 copy_directory：实测（改 web/app.js 后构建）
+    # ninja 报 "no work to do"——POST_BUILD 是「目标附带步骤」，不构成独立构建
+    # 规则，源文件变化不会触发重跑。结果是改了前端但 build/web 仍是旧副本，
+    # 跑起来看不到任何变化（已发生过，用户以为前端没生效）。
+    #
+    # 改用独立 custom target + ALL：custom target 恒定过期，每次构建都会同步
+    # web/ 到可执行文件同级目录，保证副本与源一致。
+    #
+    # 刻意不用的两个选项（都会破坏 CMake 3.10 下限）：
+    #   - CONFIGURE_DEPENDS（需 3.12）
+    #   - copy_directory_if_different（需 3.26）
+    # web/ 仅 3 个小文本文件，每次 copy_directory 的开销可忽略。
+    file(GLOB_RECURSE AIMODEL_WEB_FILES "${CMAKE_CURRENT_SOURCE_DIR}/web/*")
+    add_custom_target(aimodel_web_assets ALL
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_CURRENT_SOURCE_DIR}/web $<TARGET_FILE_DIR:system_info_ui>/web)
+                ${CMAKE_CURRENT_SOURCE_DIR}/web
+                $<TARGET_FILE_DIR:system_info_ui>/web
+        DEPENDS ${AIMODEL_WEB_FILES}
+        COMMENT "同步界面资源 web/ 到可执行文件同级目录"
+        VERBATIM)
+    add_dependencies(aimodel_web_assets system_info_ui)
 endif ()
 
 # ---- 测试（GTest 固定版本，agents.md 第 8.4 条）----
