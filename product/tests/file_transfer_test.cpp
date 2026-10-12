@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <ctime>
 #include <string>
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -18,8 +20,15 @@
 namespace {
 
 // 当前工作目录（ctest 在 build 目录运行）下的唯一临时上传根。
+// 加入「时间戳 + 进程内自增序号」保证每次运行互不污染：否则第二次运行会读到
+// 上次残留的文件，使「重名换名」「空目录列表」等用例偶发失败（非幂等）。
 std::string MakeTempRoot(const char* tag) {
-    return std::string("ft_test_") + tag;
+    static unsigned int counter = 0;
+    const std::time_t now = std::time(NULL);
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "ft_test_%s_%ld_%u", tag,
+                  static_cast<long>(now), ++counter);
+    return std::string(buf);
 }
 
 }  // namespace
