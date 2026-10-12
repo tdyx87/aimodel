@@ -619,6 +619,7 @@ void LocalServer::Impl::Run() {
         raw.reserve(4096);
         char buf[4096];
         bool headers_done = false;
+        bool too_large = false;
         size_t body_start = 0;
         size_t content_length = 0;
         bool has_content_length = false;
@@ -646,8 +647,9 @@ void LocalServer::Impl::Run() {
                     break;  // 无 body（GET 等），读完头即可
                 }
                 if (content_length > kMaxRequestBytes) {
-                    // 声明体积超限：不接收，直接拒绝。
-                    raw.clear();
+                    // 声明体积超限：不接收请求体，置标志后跳出。
+                    // 刻意不清空 raw——保留已收到的请求头，供下方按路径返回对应错误体。
+                    too_large = true;
                     break;
                 }
             }
@@ -656,8 +658,51 @@ void LocalServer::Impl::Run() {
             }
         }
 
+        // 声明超限时，先把已声明的请求体有界地丢弃，再回错误响应：
+        // 若直接关闭，客户端可能仍在发送而收到 RST，读不到错误体（表现为偶发
+        // 「网络错误」而非「文件过大」）。丢弃不缓冲，故不违背内存防护初衷；
+        // 上限 32 MB + 每次 1s 超时，避免对超大声明值长时间阻塞。
+        if (too_large) {
+            size_t drained = (raw.size() > body_start) ? (raw.size() - body_start) : 0;
+            const size_t kMaxDrain = 32u * 1024u * 1024u;
+            char sink[8192];
+            while (drained < content_length && drained < kMaxDrain) {
+                const int n = net.Recv(client, sink, sizeof(sink), 1000);
+                if (n <= 0) break;
+                drained += static_cast<size_t>(n);
+            }
+        }
+
         std::string response;
-        if (!raw.empty()) {
+        if (too_large) {
+            // 请求体超过服务端接收上限（11 MB）：按 JSON 契约返回用户语言错误。
+            // 此前返回裸 "Bad Request" 纯文本，前端 json 解析失败只能显示笼统提示
+            // （文件传输契约 §6.4 要求超限返回 TOO_LARGE 的用户可读文案）。
+            std::string method, path;
+            size_t line_end = raw.find('\n');
+            if (line_end == std::string::npos) line_end = raw.size();
+            const std::string first_line = raw.substr(0, line_end + 1);
+            bool is_upload = false;
+            if (ParseRequestFirstLine(first_line.data(), first_line.size(),
+                                      &method, &path)) {
+                // 路由比较前先去掉 query string（与 HandleRequest 的路由口径一致）。
+                const size_t q = path.find('?');
+                const std::string route =
+                    (q == std::string::npos) ? path : path.substr(0, q);
+                is_upload = (route == "/api/file/upload");
+            }
+            if (is_upload) {
+                response = BuildResponse(
+                    200, "OK", "application/json; charset=utf-8",
+                    "{\"ok\":false,\"code\":\"TOO_LARGE\","
+                    "\"message\":\"文件过大，请选择小于 10 MB 的文件。\"}");
+            } else {
+                response = BuildResponse(
+                    413, "Payload Too Large", "application/json; charset=utf-8",
+                    "{\"ok\":false,\"code\":\"REQUEST_TOO_LARGE\","
+                    "\"message\":\"请求体过大。\"}");
+            }
+        } else if (!raw.empty()) {
             std::string method, path;
             // 首行解析：把请求行（含结尾 \n）整段传入，避免二次查找失败。
             size_t line_end = raw.find('\n');
