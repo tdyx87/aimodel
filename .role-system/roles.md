@@ -60,6 +60,8 @@
 
 ## 3. 各角色详述
 
+> 所有角色的**完成标准都包含**「按 `agents.md` §6.6 写审计文档到 `product/docs/audit/`」——这是门禁放行的凭证。下列各角色的完成标准只列**角色特有**的部分。
+
 ### 3.1 `product-manager`（规划）
 - **职责**：用户研究与需求管理，产出 PRD（`product/docs/prd/`）、用户故事、里程碑与优先级。一切需求以**用户场景**表达（如"用户打开后 2 秒内可用"），禁止以 API 能力表达。
 - **输入**：用户反馈、使用数据、业务目标。
@@ -157,10 +159,12 @@ PRD(用户故事) → 设计+契约(architect) + 界面稿(ui-designer)
 
 | 门禁 | 位置 | 放行条件 |
 |------|------|---------|
-| G1 设计 | 设计→实现 | `product-manager` 的 PRD 已存在且含 Given/When/Then 验收标准 + architect 模块契约 + ui-designer 界面稿（含空状态/错误态） |
-| G2 合入 | 实现→测试 | `reviewer` ✅（按对应工种清单） |
-| G3 质量 | 测试→交付 | `test-engineer` 单测 + 用户场景 E2E 全绿 + `security-reviewer` 无 Critical/High |
-| G4 发布 | 文档→发布 | `doc-engineer` 用户文档完成 + `release-engineer` 签名/安装包/更新通道检查单全绿 |
+| G1 设计 | 设计→实现 | `product-manager` 的 PRD 已存在且含 Given/When/Then 验收标准 + architect 模块契约 + ui-designer 界面稿（含空状态/错误态）；三者各有审计文档 |
+| G2 合入 | 实现→测试 | `reviewer` ✅（按对应工种清单）+ 对应实现角色有审计文档 |
+| G3 质量 | 测试→交付 | `test-engineer` 单测 + 用户场景 E2E 全绿 + `security-reviewer` 无 Critical/High；两者各有审计文档 |
+| G4 发布 | 文档→发布 | `doc-engineer` 用户文档完成 + `release-engineer` 签名/安装包/更新通道检查单全绿；两者各有审计文档 |
+
+> 每道门禁要求对应角色已在 `product/docs/audit/` 留痕（规范见 `agents.md` §6.6）——审计文档是该环节确已发生的凭证，`orchestrator` 放行前核验。
 
 ---
 

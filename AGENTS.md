@@ -27,7 +27,7 @@ aimodel/
     ├─ README.md            # 面向用户的介绍（doc-engineer 维护）
     ├─ CMakeLists.txt       # 构建定义
     ├─ src/  include/  web/  design/  tests/  tools/  scripts/
-    └─ docs/                # 需求与设计（prd/、design/）
+    └─ docs/                # 需求与设计（prd/、design/）、审计（audit/）
 ```
 
 ### 判断某处改动该进哪层
@@ -56,10 +56,12 @@ aimodel/
 
 | 门禁 | 位置 | 放行条件 |
 |------|------|---------|
-| **G1 设计** | 设计→实现 | PRD 存在且含 Given/When/Then + architect 契约 + ui-designer 界面稿 |
-| **G2 合入** | 实现→测试 | `reviewer` ✅（按对应工种清单） |
-| **G3 质量** | 测试→交付 | `test-engineer` 单测 + E2E 全绿 + `security-reviewer` 无 Critical/High |
-| **G4 发布** | 文档→发布 | `doc-engineer` 用户文档完成 + `release-engineer` 签名/安装包/更新检查单全绿 |
+| **G1 设计** | 设计→实现 | PRD 存在且含 Given/When/Then + architect 契约 + ui-designer 界面稿（三者各有审计文档） |
+| **G2 合入** | 实现→测试 | `reviewer` ✅ + 实现角色有审计文档 |
+| **G3 质量** | 测试→交付 | `test-engineer` 单测 + E2E 全绿 + `security-reviewer` 无 Critical/High（两者各有审计文档） |
+| **G4 发布** | 文档→发布 | `doc-engineer` 用户文档完成 + `release-engineer` 检查单全绿（两者各有审计文档） |
+
+> 每个角色完成任务都要在 `product/docs/audit/` 留审计文档——它是门禁放行的凭证。完整规范见 `.role-system/agents.md` §6.6。
 
 完整角色定义、流水线、工程规范 → 见 `.role-system/agents.md` 与 `.role-system/roles.md`。
 
@@ -81,10 +83,11 @@ cd product
 
 ## 加一个新需求的步骤
 
-1. 在 `product/docs/prd/` 新增 `PRD-<feature>.md`（让 `product-manager` 来做，含 Given/When/Then）。
-2. 让 `architect` 出 `product/docs/design/<feature>.md` 契约、`ui-designer` 出 `product/design/` 界面稿 → 过 G1。
-3. 各工种在 `product/` 内并行实现 → `reviewer`（G2）→ `test-engineer` + `security-reviewer`（G3）→ 交付（G4）。
-4. 若新需求需要**新工种/新角色/新门禁**，那才动 `.role-system/`，并遵守其活文档规则。
+1. 在 `product/docs/prd/` 新增 `PRD-<feature>.md`（让 `product-manager` 来做，含 Given/When/Then）并写审计。
+2. 让 `architect` 出 `product/docs/design/<feature>.md` 契约、`ui-designer` 出 `product/design/` 界面稿，各自写审计 → 过 G1。
+3. 各工种在 `product/` 内并行实现并写审计 → `reviewer`（G2，结论即审计）→ `test-engineer` + `security-reviewer`（G3，各自审计）→ 交付（G4）。
+4. 每完成一个角色就在 `product/docs/audit/` 留一份 `<date>-<role>-<task>.md`（模板 `_template.md`）——它是门禁放行的凭证。
+5. 若新需求需要**新工种/新角色/新门禁**，那才动 `.role-system/`，并遵守其活文档规则。
 
 > 要完全替换用例（比如做一个和硬件无关的新产品）：清空 `product/` 内的源码与文档，保留目录骨架，从第 1 步重来。
 
