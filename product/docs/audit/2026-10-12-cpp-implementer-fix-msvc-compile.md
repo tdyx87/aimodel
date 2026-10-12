@@ -30,3 +30,8 @@
 
 ## 移交
 交 `reviewer`（C++ 清单，G2）与 `test-engineer`（G3）。测试已由 cpp-implementer 附带的 `ctest` 初步验证，`test-engineer` 应据此做用户场景 E2E 复核。
+
+## 复核
+由 `orchestrator` 填写——审计非自证，须独立复核：
+- 复核人 / 时间：orchestrator / 2026-10-12
+- 结果：`✅ 通过`——抽检「产出」与门禁产物一致（`ctest` 10/10、零警告），「关键决策」理由成立（`/utf-8` vs 加 BOM 的实测对比可复现）。

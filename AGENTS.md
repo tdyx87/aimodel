@@ -61,7 +61,7 @@ aimodel/
 | **G3 质量** | 测试→交付 | `test-engineer` 单测 + E2E 全绿 + `security-reviewer` 无 Critical/High（两者各有审计文档） |
 | **G4 发布** | 文档→发布 | `doc-engineer` 用户文档完成 + `release-engineer` 检查单全绿（两者各有审计文档） |
 
-> 每个角色完成任务都要在 `product/docs/audit/` 留审计文档——它是门禁放行的凭证。完整规范见 `.role-system/agents.md` §6.6。
+> 每个角色完成任务都要在 `product/docs/audit/` 留审计文档——它是门禁放行的凭证。审计**非自证**，须经 orchestrator 或下游角色抽检复核后才放行。完整规范见 `.role-system/agents.md` §6.6。
 
 完整角色定义、流水线、工程规范 → 见 `.role-system/agents.md` 与 `.role-system/roles.md`。
 
