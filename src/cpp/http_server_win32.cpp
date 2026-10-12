@@ -103,7 +103,7 @@ int HttpServerImpl::Recv(net_socket_t s, char* buf, int cap, int timeout_ms) {
     timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
-    int sel = ::select(s + 1, &readfds, NULL, NULL, &tv);
+    int sel = ::select(static_cast<int>(s) + 1, &readfds, NULL, NULL, &tv);
     if (sel <= 0) {
         return -1;
     }

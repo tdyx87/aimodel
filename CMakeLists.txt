@@ -56,21 +56,30 @@ else ()
     target_sources(aimodel PRIVATE src/cpp/system_info_posix.cpp src/cpp/http_server_posix.cpp)
 endif ()
 
-# 警告配置（本地构建开墙，CI 可加 -Werror）
+# 警告与编码配置（G3 质量门禁：本项目全部目标零警告）
+# 源码为 UTF-8（无 BOM）且含中文注释/字面量。MSVC 默认按系统 ANSI 代码页
+# （简中环境为 GBK/936）解码源文件，会把 UTF-8 多字节序列错位配对，
+# 进而吞掉后续字节、破坏 #if/#endif 结构（曾导致 C1020「意外的 #endif」而无法编译）。
+# /utf-8 同时固定源码与执行字符集，保证中文字面量按 UTF-8 进入二进制
+# （HTTP 响应头声明 charset=utf-8，若按 GBK 编码浏览器会乱码）。
 if (MSVC)
-    target_compile_options(aimodel PRIVATE /W4)
+    set(AIMODEL_WARN_FLAGS /utf-8 /W4)
 else ()
-    target_compile_options(aimodel PRIVATE -Wall -Wextra -Wpedantic)
+    set(AIMODEL_WARN_FLAGS -Wall -Wextra -Wpedantic)
 endif ()
+
+target_compile_options(aimodel PRIVATE ${AIMODEL_WARN_FLAGS})
 
 # ---- CLI 工具 ----
 if (AIMODEL_BUILD_TOOLS)
     add_executable(system_info_cli tools/system_info_cli.cpp)
     target_link_libraries(system_info_cli PRIVATE aimodel)
+    target_compile_options(system_info_cli PRIVATE ${AIMODEL_WARN_FLAGS})
 
     # docs/design/http-ui.md 第 4 节：产品入口（本地服务 + 打开浏览器）
     add_executable(system_info_ui tools/system_info_ui.cpp)
     target_link_libraries(system_info_ui PRIVATE aimodel)
+    target_compile_options(system_info_ui PRIVATE ${AIMODEL_WARN_FLAGS})
 
     # 界面为免构建静态资源（web/），随可执行文件就位，双击即可打开
     add_custom_command(TARGET system_info_ui POST_BUILD
@@ -93,6 +102,7 @@ if (AIMODEL_BUILD_TESTS)
 
     add_executable(system_info_test tests/system_info_test.cpp)
     target_link_libraries(system_info_test PRIVATE aimodel GTest::gtest_main)
+    target_compile_options(system_info_test PRIVATE ${AIMODEL_WARN_FLAGS})
 
     include(GoogleTest)
     gtest_discover_tests(system_info_test)

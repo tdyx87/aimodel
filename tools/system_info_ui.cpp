@@ -26,14 +26,19 @@ void SignalHandler(int) {
 }
 
 void PrintHelp(const char* prog) {
-    std::printf("用法：%s [选项]\n", prog);
-    std::printf("产品入口：在本地浏览器中启动用户界面，并提供硬件报告 HTTP 服务。\n"
-                "隐私：服务仅监听 127.0.0.1；数据不出本机。\n"
-                "选项：\n"
-                "  --port N       监听端口（默认 0 = 系统分配，启动后打印真实端口）\n"
-                "  --no-open      启动后不自动打开浏览器\n"
-                "  --web-root DIR 静态资源目录（默认：与可执行文件同级的 web）\n"
-                "  --help         显示本帮助\n");
+    // 中文文案一律不进 printf 格式串：MSVC 的格式串检查器遇非 ASCII 会
+    // 转码失败（报 C4819 代码页 0）并中止扫描，误判占位符数量（C4474）。
+    // 静态文案无需格式化，直接 fputs；带插值的先拼串再输出。
+    std::string usage = std::string("用法：") + prog + " [选项]\n";
+    std::fputs(usage.c_str(), stdout);
+    std::fputs("产品入口：在本地浏览器中启动用户界面，并提供硬件报告 HTTP 服务。\n"
+               "隐私：服务仅监听 127.0.0.1；数据不出本机。\n"
+               "选项：\n"
+               "  --port N       监听端口（默认 0 = 系统分配，启动后打印真实端口）\n"
+               "  --no-open      启动后不自动打开浏览器\n"
+               "  --web-root DIR 静态资源目录（默认：与可执行文件同级的 web）\n"
+               "  --help         显示本帮助\n",
+               stdout);
 }
 
 }  // namespace
@@ -50,7 +55,7 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if (arg == "--port") {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "错误：--port 需要一个数值参数\n");
+                std::fputs("错误：--port 需要一个数值参数\n", stderr);
                 return 2;
             }
             port = std::atoi(argv[++i]);
@@ -58,12 +63,13 @@ int main(int argc, char* argv[]) {
             no_open = true;
         } else if (arg == "--web-root") {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "错误：--web-root 需要一个目录参数\n");
+                std::fputs("错误：--web-root 需要一个目录参数\n", stderr);
                 return 2;
             }
             web_root = argv[++i];
         } else {
-            std::fprintf(stderr, "未知选项：%s\n", argv[i]);
+            std::string unknown = std::string("未知选项：") + argv[i] + "\n";
+            std::fputs(unknown.c_str(), stderr);
             return 2;
         }
     }
@@ -76,15 +82,16 @@ int main(int argc, char* argv[]) {
     aimodel::LocalServer server;
     std::string error;
     if (!server.Start(config, &error)) {
-        std::fprintf(stderr, "启动服务失败：%s\n", error.c_str());
+        std::string fail = std::string("启动服务失败：") + error + "\n";
+        std::fputs(fail.c_str(), stderr);
         return 1;
     }
 
     const int bound = server.bound_port();
-    std::printf("aimodel 已启动。\n");
+    std::fputs("aimodel 已启动。\n", stdout);
     std::printf("  界面：http://127.0.0.1:%d/\n", bound);
     std::printf("  硬件报告：http://127.0.0.1:%d/api/system-info\n", bound);
-    std::printf("  按 Ctrl+C 退出。\n", bound);
+    std::fputs("  按 Ctrl+C 退出。\n", stdout);
 
     if (!no_open) {
 #if defined(_WIN32) || defined(_WIN64)
@@ -101,6 +108,6 @@ int main(int argc, char* argv[]) {
     while (!g_quit) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    std::printf("\naimodel 已停止。\n");
+    std::fputs("\naimodel 已停止。\n", stdout);
     return 0;
 }
