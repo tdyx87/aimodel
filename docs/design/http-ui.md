@@ -9,7 +9,7 @@
 │  system_info_ui.exe                                 │
 │  ├─ LocalServer（仅绑定 127.0.0.1，隐私红线）          │
 │  │   ├─ GET /api/system-info → ToJson(GetSystemInfo)│
-│  │   └─ GET /…  ← 静态资源 web/dist（React 产物）      │
+│  │   └─ GET /…  ← 静态资源 web/（免构建原生静态页）    │
 │  └─ 启动后自动打开默认浏览器 → http://127.0.0.1:<port> │
 └──────────────────────────────────────────────────────┘
      浏览器界面（用户看到的产品）：React + TS + Vite
@@ -51,7 +51,7 @@ public:
 | 方法/路径 | 响应 |
 |-----------|------|
 | `GET /api/system-info` | `200 application/json` = `ToJson(GetSystemInfo())` |
-| `GET /` → `/index.html` | 静态文件；`static_root` 缺失或无 `web/dist` 时返回 404 提示页（用户语言） |
+| `GET /` → `/index.html` | 静态文件；`static_root` 缺失或无 `web/` 时返回 404 提示页（用户语言） |
 | `GET /<path>`（白名单扩展名） | 静态文件；含 `..`/反斜杠/`%2e%2e` → `404`（不泄露路径） |
 | 其他方法 / 未知路径 | `405` / `404`，均为纯文本或提示页 |
 

@@ -1,4 +1,4 @@
-// 本地 HTTP 服务：为产品 UI（web/dist）提供静态页面与 /api/system-info 数据接口。
+// 本地 HTTP 服务：为产品 UI（web/）提供静态页面与 /api/system-info 数据接口。
 // 隐私红线：仅绑定 127.0.0.1，数据不出本机（docs/design/http-ui.md 契约）。
 
 #ifndef AIMODEL_HTTP_SERVER_H_
@@ -13,7 +13,7 @@ namespace aimodel {
 struct ServerConfig {
     std::string bind_host;    // 仅接受 "127.0.0.1"（Start 内强校验，防暴露到局域网）
     int port;                 // 0 = 系统分配；Start 成功后读 bound_port()
-    std::string static_root;  // 静态资源目录（web/dist）；空 = 仅提供 API
+    std::string static_root;  // 静态资源目录（web/）；空 = 仅提供 API
 };
 
 // 单线程接受循环的本地服务器（localhost 单用户场景足够）。
