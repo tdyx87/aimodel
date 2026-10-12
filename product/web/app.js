@@ -342,3 +342,318 @@
 
     load(false);
 })();
+
+/*
+ * aimodel 文件传输界面（原生实现，无构建、无外部依赖）
+ * 契约：docs/design/file-transfer-contract.md —— POST /api/file/upload、
+ *       GET /api/file/download；失败返回 {ok,code,message}。
+ * 界面：design/file-transfer-ui.md —— 状态齐备；只展示授权目录名，
+ *       不暴露服务端绝对路径与内部结构；权限与路径判定全部由后端承担。
+ */
+(function () {
+    'use strict';
+
+    var MAX_BYTES = 10 * 1024 * 1024;  // 与后端契约 6.4 一致
+    var UPLOAD_URL = 'api/file/upload';
+    var DOWNLOAD_URL = 'api/file/download';
+    var SAVED_DIR_NAME = 'data/uploads';  // 仅展示目录名，不展示绝对路径
+
+    var transferBody = document.getElementById('transfer-body');
+    if (!transferBody) return;  // 界面未包含文件传输区时静默跳过
+
+    var state = {
+        file: null,       // 当前选择的 File
+        phase: 'idle',    // idle | uploading | done | error
+        message: '',
+        items: []         // 已上传文件名列表（本会话内累积）
+    };
+    var busy = false;
+
+    // ---- 工具 ----
+    function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = String(text);
+        return node;
+    }
+
+    function formatBytes(bytes) {
+        if (!isFinite(bytes) || bytes <= 0) return '0 MB';
+        if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        return Math.round(bytes / (1024 * 1024)) + ' MB';
+    }
+
+    function announce(text) {
+        var live = document.getElementById('live');
+        if (live) live.textContent = text;
+    }
+
+    // 错误码 → 用户语言文案。只呈现语义，不回显服务端内部细节（界面稿 §6）。
+    function messageForCode(code, fallback) {
+        switch (code) {
+            case 'TOO_LARGE':
+                return '文件过大，请选择小于 10 MB 的文件。';
+            case 'PATH_NOT_ALLOWED':
+                return '路径不合法，请选择“允许保存目录”内的文件名。';
+            case 'NOT_FOUND':
+                return '文件不存在，可能已被移除。';
+            case 'WRITE_FAILED':
+                return '保存文件失败，请检查目录是否可写入。';
+            default:
+                return fallback || '操作失败，请重试。';
+        }
+    }
+
+    // ---- 片段 ----
+    function dropzone() {
+        var zone = el('div', 'dropzone');
+        zone.setAttribute('role', 'button');
+        zone.setAttribute('tabindex', '0');
+        zone.setAttribute('aria-label', '选择或拖放文件上传');
+
+        var icon = el('span', 'dropzone-icon', '⬆');
+        icon.setAttribute('aria-hidden', 'true');
+        zone.appendChild(icon);
+        zone.appendChild(el('div', null, '选择文件上传，或把文件拖到这里'));
+        zone.appendChild(el('div', 'dropzone-hint', '单个文件上限 ' + formatBytes(MAX_BYTES) + ' · 文件只保存在本机'));
+
+        // 隐藏的 file input：同时服务鼠标点击与键盘操作（界面稿交互规则 1）。
+        var input = el('input');
+        input.type = 'file';
+        input.hidden = true;
+        input.addEventListener('change', function () {
+            if (input.files && input.files.length > 0) selectFile(input.files[0]);
+            input.value = '';  // 清空，允许再次选择同一文件
+        });
+        zone.appendChild(input);
+
+        zone.addEventListener('click', function () { input.click(); });
+        zone.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                input.click();
+            }
+        });
+
+        ['dragenter', 'dragover'].forEach(function (type) {
+            zone.addEventListener(type, function (event) {
+                event.preventDefault();
+                zone.classList.add('is-over');
+            });
+        });
+        ['dragleave', 'drop'].forEach(function (type) {
+            zone.addEventListener(type, function (event) {
+                event.preventDefault();
+                zone.classList.remove('is-over');
+            });
+        });
+        zone.addEventListener('drop', function (event) {
+            var files = event.dataTransfer && event.dataTransfer.files;
+            if (files && files.length > 0) selectFile(files[0]);
+        });
+
+        return zone;
+    }
+
+    function statusNode() {
+        var box = el('div', 'upload-status');
+        if (state.phase === 'uploading') {
+            box.classList.add('is-busy');
+            box.appendChild(el('span', null, '正在上传…'));
+            return box;
+        }
+        if (state.phase === 'done') {
+            box.classList.add('is-ok');
+            box.appendChild(el('span', null, state.message || '上传成功'));
+            return box;
+        }
+        if (state.phase === 'error') {
+            box.classList.add('is-bad');
+            box.appendChild(el('span', null, state.message || '上传失败'));
+            var retry = el('button', 'btn btn-quiet btn-sm');
+            retry.type = 'button';
+            retry.appendChild(el('span', 'btn-text', '重试'));
+            retry.addEventListener('click', function () {
+                if (state.file) uploadFile(state.file);
+            });
+            box.appendChild(retry);
+            return box;
+        }
+        return box;
+    }
+
+    function selectedFileBox() {
+        var box = el('div');
+
+        var row = el('div', 'file-row');
+        var name = el('span', 'file-name', state.file.name);
+        name.title = state.file.name;  // 名称过长时悬停可见全名
+        row.appendChild(name);
+        row.appendChild(el('span', 'row-value', formatBytes(state.file.size)));
+        box.appendChild(row);
+
+        box.appendChild(statusNode());
+
+        var actions = el('div', 'file-row');
+        var upload = el('button', 'btn');
+        upload.type = 'button';
+        upload.disabled = state.phase === 'uploading';
+        upload.appendChild(el('span', 'btn-text', '上传'));
+        upload.addEventListener('click', function () { uploadFile(state.file); });
+        var cancel = el('button', 'btn btn-quiet btn-sm');
+        cancel.type = 'button';
+        cancel.disabled = state.phase === 'uploading';
+        cancel.appendChild(el('span', 'btn-text', '取消选择'));
+        cancel.addEventListener('click', function () {
+            state.file = null;
+            state.phase = 'idle';
+            state.message = '';
+            render();
+        });
+        actions.appendChild(upload);
+        actions.appendChild(cancel);
+        box.appendChild(actions);
+
+        return box;
+    }
+
+    function savedPlace() {
+        var box = el('div', 'saved-place');
+        box.appendChild(el('span', 'saved-place-label', '允许保存目录：'));
+        box.appendChild(el('span', 'saved-place-value', SAVED_DIR_NAME));
+        return box;
+    }
+
+    function downloadList() {
+        var box = el('div');
+        if (state.items.length === 0) {
+            var empty = el('div', 'state');
+            var mark = el('span', 'state-icon', '📥');
+            mark.setAttribute('aria-hidden', 'true');
+            empty.appendChild(mark);
+            empty.appendChild(el('span', null, '本次会话还没有上传文件'));
+            box.appendChild(empty);
+            return box;
+        }
+
+        var list = el('div', 'list');
+        state.items.forEach(function (name) {
+            var row = el('div', 'download-row');
+            var label = el('span', 'file-name', name);
+            label.title = name;
+            row.appendChild(label);
+
+            var btn = el('button', 'btn btn-quiet btn-sm');
+            btn.type = 'button';
+            var icon = el('span', 'btn-icon', '⬇');
+            icon.setAttribute('aria-hidden', 'true');
+            btn.appendChild(icon);
+            btn.appendChild(el('span', 'btn-text', '下载'));
+            btn.addEventListener('click', function () {
+                // 直接跳转触发浏览器下载；文件名由 Content-Disposition 决定。
+                window.location.href = DOWNLOAD_URL + '?file_name=' + encodeURIComponent(name);
+            });
+            row.appendChild(btn);
+            list.appendChild(row);
+        });
+        box.appendChild(list);
+        return box;
+    }
+
+    // ---- 行为 ----
+    function selectFile(file) {
+        state.file = file;
+        if (file.size > MAX_BYTES) {
+            // 前端先拦一道（界面稿「超出限制」态）；后端仍会再校验一次。
+            state.phase = 'error';
+            state.message = '文件过大，请选择小于 ' + formatBytes(MAX_BYTES) + ' 的文件。';
+        } else {
+            state.phase = 'idle';
+            state.message = '';
+        }
+        render();
+    }
+
+    function uploadFile(file) {
+        if (busy) return;
+        busy = true;
+        state.phase = 'uploading';
+        state.message = '';
+        render();
+        announce('正在上传 ' + file.name + '…');
+
+        var controller = new AbortController();
+        var timer = window.setTimeout(function () { controller.abort(); }, 30000);
+
+        fetch(UPLOAD_URL + '?file_name=' + encodeURIComponent(file.name), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: file,
+            cache: 'no-store',
+            signal: controller.signal
+        })
+            .then(function (response) {
+                return response.json().catch(function () { return null; }).then(function (payload) {
+                    return { status: response.status, payload: payload };
+                });
+            })
+            .then(function (result) {
+                var payload = result.payload;
+                if (!payload || payload.ok !== true) {
+                    state.phase = 'error';
+                    state.message = messageForCode(payload && payload.code, payload && payload.message);
+                    announce('上传失败：' + state.message);
+                    return;
+                }
+                state.phase = 'done';
+                state.message = '上传成功';
+                // 落盘名由后端决定（重名会加时间戳），用它更新下载列表。
+                var saved = payload.file_name;
+                if (saved && state.items.indexOf(saved) < 0) {
+                    state.items.push(saved);
+                    state.items.sort();
+                }
+                announce('上传成功');
+            })
+            .catch(function () {
+                state.phase = 'error';
+                state.message = '上传失败，请确认 aimodel 正在运行。';
+                announce(state.message);
+            })
+            .then(function () {
+                window.clearTimeout(timer);
+                busy = false;
+                render();
+            });
+    }
+
+    // ---- 渲染 ----
+    function render() {
+        transferBody.textContent = '';
+
+        if (state.phase === 'idle' || state.phase === 'error') {
+            transferBody.appendChild(dropzone());
+        }
+        if (state.file) {
+            if (state.phase === 'idle' || state.phase === 'error') {
+                transferBody.appendChild(selectedFileBox());
+            } else {
+                // 上传中 / 成功：只显示当前文件名与状态，不重复给出选择控件。
+                var row = el('div', 'file-row');
+                var name = el('span', 'file-name', state.file.name);
+                name.title = state.file.name;
+                row.appendChild(name);
+                row.appendChild(el('span', 'row-value', formatBytes(state.file.size)));
+                transferBody.appendChild(row);
+                transferBody.appendChild(statusNode());
+            }
+        }
+
+        transferBody.appendChild(savedPlace());
+
+        transferBody.appendChild(el('div', 'card-detail', '已上传的文件'));
+        transferBody.appendChild(downloadList());
+    }
+
+    render();
+})();

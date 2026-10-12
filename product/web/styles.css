@@ -371,3 +371,107 @@ body {
     color: var(--text-muted);
     font-size: 12px;
 }
+
+/* ---- 文件传输（design/file-transfer-ui.md）---- */
+
+/* 拖放区：虚线上边框的空状态容器，dragover 时高亮 */
+.dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-8) var(--space-4);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-control);
+    color: var(--text-muted);
+    text-align: center;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.dropzone.is-over {
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+.dropzone-icon {
+    font-size: 24px;
+}
+
+.dropzone-hint {
+    font-size: 12px;
+}
+
+/* 已选文件条：文件名 + 体积，右侧留给操作按钮 */
+.file-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 上传状态：成功/失败均用文案 + 语义色，不暴露服务端内部细节 */
+.upload-status {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-size: 12px;
+}
+
+.upload-status.is-ok {
+    color: var(--success);
+}
+
+.upload-status.is-bad {
+    color: var(--danger);
+}
+
+.upload-status.is-busy {
+    color: var(--text-muted);
+}
+
+/* 下载列表：每行一个已上传文件 + 下载按钮 */
+.download-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+/* 保存位置提示：只显示授权目录名，不展示绝对路径（界面稿 §2、§6） */
+.saved-place {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--bg);
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.saved-place-label {
+    flex: none;
+}
+
+.saved-place-value {
+    color: var(--text);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.btn-sm {
+    padding: var(--space-1) var(--space-3);
+    font-size: 12px;
+}
