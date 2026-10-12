@@ -165,6 +165,43 @@ std::string JsonEscape(const std::string& s) {
     return out;
 }
 
+// RFC 5987 的 filename* 值编码：保留 unreserved 字符，其余按 UTF-8 字节百分号编码。
+std::string Rfc5987Encode(const std::string& s) {
+    static const char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size() * 3);
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        const bool unreserved =
+            (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
+        if (unreserved) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[(c >> 4) & 0x0Fu]);
+            out.push_back(kHex[c & 0x0Fu]);
+        }
+    }
+    return out;
+}
+
+// 传统 filename= 的 ASCII 回退值：非 ASCII 与引号/分隔符替换为 '_'（仅供老客户端）。
+std::string AsciiFilenameFallback(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x20u || c >= 0x7Fu || c == '"' || c == '\\' || c == ';') {
+            out.push_back('_');
+        } else {
+            out.push_back(static_cast<char>(c));
+        }
+    }
+    if (out.empty()) out = "download";
+    return out;
+}
+
 // 从 query string 取参数值（URL 解码）；参数不存在返回空串。
 // 仅用于白名单内的参数名（如 file_name），不用于任意路径拼接。
 std::string ExtractQueryParam(const std::string& raw_path,
@@ -444,14 +481,23 @@ std::string HandleRequest(const std::string& method, const std::string& raw_path
         std::string error;
         std::string content;
         FileError code = FileError::kNone;
-        if (!ft.ReadUpload(ExtractQueryParam(raw_path, "file_name"), &content,
-                           &error, &code)) {
+        const std::string file_name = ExtractQueryParam(raw_path, "file_name");
+        if (!ft.ReadUpload(file_name, &content, &error, &code)) {
             return BuildFileErrorResponse(code, error);
         }
         std::ostringstream os;
-        os << "Content-Type: application/octet-stream\r\n"
+        // 下载响应需带 Content-Disposition（BuildResponse 不支持），故手工拼接；
+        // 但**必须**以状态行开头——曾漏掉 "HTTP/1.1 200 OK"，导致客户端把它当成
+        // HTTP/0.9（curl 报 "Received HTTP/0.9 when not allowed"）、浏览器下载失败。
+        //
+        // 文件名编码：HTTP 头是 latin-1/ASCII，直接把 UTF-8 字节写进去会被浏览器
+        // 拒绝或乱码。按 RFC 6266 同时给出 ASCII 回退（filename=）与 UTF-8 编码值
+        // （filename*=UTF-8''），中文名才能正确落为下载文件名。
+        os << "HTTP/1.1 200 OK\r\n"
+           << "Content-Type: application/octet-stream\r\n"
            << "Content-Disposition: attachment; filename=\""
-           << JsonEscape(ExtractQueryParam(raw_path, "file_name")) << "\"\r\n"
+           << AsciiFilenameFallback(file_name) << "\"; filename*=UTF-8''"
+           << Rfc5987Encode(file_name) << "\r\n"
            << "Content-Length: " << content.size() << "\r\n"
            << "Cache-Control: no-store\r\n"
            << "Connection: close\r\n\r\n"
