@@ -137,6 +137,7 @@
 
 ### 3.12 `orchestrator`（协调）
 - **职责**：拆解任务、按角色/工种分配、跟踪进度、收敛产出。
+- **派发前校验 G1**：向 `architect` / `ui-designer` / 任何实现角色派发任务前，先确认 `docs/prd/` 存在覆盖本次范围的 PRD，且每条需求带 Given/When/Then 验收标准。缺失则**先派 `product-manager`**，不得跳过规划阶段直接派实现 —— `architect` 与 `ui-designer` 均声明 PRD 为输入，无 PRD 开工会导致需求无源、验收无基准、用户场景无可回溯依据。
 - **原则**：G1→G4 门禁按序放行；并行实现时不同工种改不同目录，避免冲突。
 - **完成标准**：全部子任务完成且门禁通过，产出收敛交付。
 
@@ -154,7 +155,7 @@ PRD(用户故事) → 设计+契约(architect) + 界面稿(ui-designer)
 
 | 门禁 | 位置 | 放行条件 |
 |------|------|---------|
-| G1 设计 | 设计→实现 | architect 模块契约 + ui-designer 界面稿（含空状态/错误态） |
+| G1 设计 | 设计→实现 | `product-manager` 的 PRD 已存在且含 Given/When/Then 验收标准 + architect 模块契约 + ui-designer 界面稿（含空状态/错误态） |
 | G2 合入 | 实现→测试 | `reviewer` ✅（按对应工种清单） |
 | G3 质量 | 测试→交付 | `test-engineer` 单测 + 用户场景 E2E 全绿 + `security-reviewer` 无 Critical/High |
 | G4 发布 | 文档→发布 | `doc-engineer` 用户文档完成 + `release-engineer` 签名/安装包/更新通道检查单全绿 |

@@ -73,7 +73,7 @@ PRD(用户故事) → 架构契约(architect) + 界面稿(ui-designer)
 
 | 门禁 | 位置 | 放行条件 |
 |------|------|---------|
-| G1 设计 | 设计→实现 | architect 模块契约 + ui-designer 界面稿（含空/错误状态） |
+| G1 设计 | 设计→实现 | `product-manager` 的 PRD 已存在且含 Given/When/Then 验收标准 + architect 模块契约 + ui-designer 界面稿（含空/错误状态） |
 | G2 合入 | 实现→测试 | `reviewer` ✅（按对应工种清单） |
 | G3 质量 | 测试→交付 | `test-engineer` 单测+E2E 全绿 + `security-reviewer` 无 Critical/High |
 | G4 发布 | 文档→发布 | `doc-engineer` 用户文档完成 + `release-engineer` 签名/安装包/更新检查单全绿 |
