@@ -44,6 +44,10 @@ coverage/
 *.user
 *.suo
 
+# Agent tooling / local workspace data
+.freebuff/
+.workbuddy-ai/
+
 # Misc
 *.log
 .DS_Store
