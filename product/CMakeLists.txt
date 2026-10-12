@@ -46,7 +46,8 @@ endif ()
 target_sources(aimodel PRIVATE
     src/cpp/system_info.cpp
     src/cpp/http_server.cpp
-    src/cpp/file_transfer.cpp)
+    src/cpp/file_transfer.cpp
+    src/cpp/chat_suggest.cpp)
 # 平台差异实现（编译期隔离）
 if (WIN32)
     target_sources(aimodel PRIVATE src/cpp/system_info_win32.cpp src/cpp/http_server_win32.cpp)
@@ -110,9 +111,15 @@ if (AIMODEL_BUILD_TESTS)
     target_link_libraries(file_transfer_test PRIVATE aimodel GTest::gtest_main)
     target_compile_options(file_transfer_test PRIVATE ${AIMODEL_WARN_FLAGS})
 
+    # 聊天/推荐（chat_suggest）单测：覆盖空 query 拒绝、分类不变量、JSON 契约字段
+    add_executable(chat_suggest_test tests/chat_suggest_test.cpp)
+    target_link_libraries(chat_suggest_test PRIVATE aimodel GTest::gtest_main)
+    target_compile_options(chat_suggest_test PRIVATE ${AIMODEL_WARN_FLAGS})
+
     include(GoogleTest)
     gtest_discover_tests(system_info_test)
     gtest_discover_tests(file_transfer_test)
+    gtest_discover_tests(chat_suggest_test)
 endif ()
 
 # ---- 安装 ----

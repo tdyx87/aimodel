@@ -657,3 +657,319 @@
 
     render();
 })();
+
+/*
+ * aimodel 聊天/推荐界面（原生实现，无构建、无外部依赖）
+ * 契约：docs/design/chat-system-contract.md —— GET api/chat/capability、
+ *       POST api/chat/suggest（JSON {query}）；失败返回 {ok:false,error:{code,message}}。
+ * 界面：design/screens/chat-recommend.md —— 四态齐备；只展示本机配置摘要，
+ *       不调用外部模型，数据不出本机。
+ */
+(function () {
+    'use strict';
+
+    var SUGGEST_URL = 'api/chat/suggest';
+    var TIMEOUT_MS = 10000;
+    var MAX_QUERY_LEN = 500;
+
+    var chatBody = document.getElementById('chat-body');
+    if (!chatBody) return;  // 界面未包含聊天区时静默跳过
+
+    var EXAMPLES = [
+        '我这台电脑能跑 7B 模型吗？',
+        '推荐一个适合我配置的模型',
+        '我的显存够用吗？'
+    ];
+
+    var state = {
+        query: '',
+        phase: 'idle',   // idle | loading | result | error
+        result: null,    // ChatResponse
+        message: ''
+    };
+    var busy = false;
+
+    // ---- 工具 ----
+    function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = String(text);
+        return node;
+    }
+
+    function formatBytes(bytes) {
+        if (!isFinite(bytes) || bytes <= 0) return '0 MB';
+        if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        return Math.round(bytes / (1024 * 1024)) + ' MB';
+    }
+
+    function announce(text) {
+        var live = document.getElementById('live');
+        if (live) live.textContent = text;
+    }
+
+    function categoryInfo(category) {
+        switch (category) {
+            case 'recommend': return { label: '可以运行', tone: 'is-ok' };
+            case 'not_recommended': return { label: '不建议', tone: 'is-bad' };
+            case 'check':
+            default: return { label: '需要检查', tone: 'is-warn' };
+        }
+    }
+
+    // ---- 片段 ----
+    function composer() {
+        var loading = state.phase === 'loading';
+        var form = el('form', 'chat-composer');
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            submit(state.query);
+        });
+
+        var field = el('input', 'chat-input');
+        field.type = 'text';
+        field.placeholder = '我这台电脑能跑多大的模型？';
+        field.value = state.query;
+        field.maxLength = MAX_QUERY_LEN;
+        field.disabled = loading;
+        field.setAttribute('aria-label', '输入你的问题');
+        field.addEventListener('input', function () { state.query = field.value; });
+        form.appendChild(field);
+
+        var send = el('button', 'btn chat-send');
+        send.type = 'submit';
+        send.disabled = loading;
+        if (loading) {
+            var spinner = el('span', 'spinner');
+            spinner.setAttribute('aria-hidden', 'true');
+            send.appendChild(spinner);
+        } else {
+            var icon = el('span', 'btn-icon', '➤');
+            icon.setAttribute('aria-hidden', 'true');
+            send.appendChild(icon);
+        }
+        send.appendChild(el('span', 'btn-text', loading ? '思考中…' : '发送'));
+        form.appendChild(send);
+
+        return form;
+    }
+
+    function examples() {
+        var box = el('div', 'chat-examples');
+        box.appendChild(el('div', 'chat-examples-label', '试试这样问：'));
+        var row = el('div', 'chat-chips');
+        EXAMPLES.forEach(function (text) {
+            var chip = el('button', 'chip');
+            chip.type = 'button';
+            chip.appendChild(el('span', 'chip-text', text));
+            chip.addEventListener('click', function () {
+                state.query = text;
+                submit(text);
+            });
+            row.appendChild(chip);
+        });
+        box.appendChild(row);
+        return box;
+    }
+
+    function configRow(label, value) {
+        var row = el('div', 'row');
+        row.appendChild(el('span', 'row-label', label));
+        row.appendChild(el('span', 'row-value', value));
+        return row;
+    }
+
+    function configSummary(snapshot) {
+        if (!snapshot) return null;
+        var list = el('div', 'list chat-config');
+
+        var cpu = snapshot.cpus && snapshot.cpus.length > 0 ? snapshot.cpus[0] : null;
+        if (cpu && cpu.brand) list.appendChild(configRow('处理器', cpu.brand));
+
+        var gpus = snapshot.gpus || [];
+        if (gpus.length > 0) {
+            var gpuText = gpus.map(function (gpu) {
+                var name = gpu.name || '未知显卡';
+                var vram = gpu.video_memory_bytes > 0
+                    ? formatBytes(gpu.video_memory_bytes) + ' 显存'
+                    : '共享内存';
+                return name + ' · ' + vram;
+            }).join('；');
+            list.appendChild(configRow('显卡', gpuText));
+        }
+
+        var mem = snapshot.memory;
+        if (mem && mem.total_bytes > 0) {
+            list.appendChild(configRow(
+                '内存',
+                formatBytes(mem.total_bytes) + '（可用 ' + formatBytes(mem.available_bytes) + '）'
+            ));
+        }
+
+        var disks = snapshot.disks || [];
+        if (disks.length > 0) {
+            var maxFree = 0;
+            disks.forEach(function (disk) {
+                if (disk.free_bytes > maxFree) maxFree = disk.free_bytes;
+            });
+            list.appendChild(configRow('磁盘', '最大可用分区剩余 ' + formatBytes(maxFree)));
+        }
+
+        return list.childNodes.length > 0 ? list : null;
+    }
+
+    function resultNode(response) {
+        var box = el('div', 'chat-result');
+        var recs = (response.recommendations && response.recommendations.length > 0)
+            ? response.recommendations : [];
+        var rec = recs.length > 0 ? recs[0] : null;
+
+        if (rec) {
+            var info = categoryInfo(rec.category);
+            var badge = el('span', 'chat-badge ' + info.tone, info.label);
+            badge.setAttribute('role', 'status');
+            box.appendChild(badge);
+            if (rec.reason) box.appendChild(el('p', 'chat-reason', rec.reason));
+        }
+
+        var summary = configSummary(response.config_snapshot);
+        if (summary) {
+            box.appendChild(el('div', 'chat-section-title', '本机配置摘要'));
+            box.appendChild(summary);
+        }
+
+        if (rec && rec.next_steps && rec.next_steps.length > 0) {
+            box.appendChild(el('div', 'chat-section-title', '下一步'));
+            var steps = el('ol', 'chat-steps');
+            rec.next_steps.forEach(function (step) {
+                var li = el('li', 'chat-step');
+                if (step.title) li.appendChild(el('div', 'chat-step-title', step.title));
+                if (step.detail) li.appendChild(el('div', 'chat-step-detail', step.detail));
+                if (step.action) li.appendChild(el('div', 'chat-step-action', step.action));
+                steps.appendChild(li);
+            });
+            box.appendChild(steps);
+        }
+
+        return box;
+    }
+
+    function skeletonBlock() {
+        var block = el('div', 'chat-result');
+        block.appendChild(el('div', 'skeleton-line is-short'));
+        block.appendChild(el('div', 'skeleton-line'));
+        block.appendChild(el('div', 'skeleton-line is-short'));
+        return block;
+    }
+
+    function errorNode() {
+        var box = el('div', 'chat-error');
+        box.setAttribute('role', 'alert');
+        var icon = el('span', 'state-icon', '😢');
+        icon.setAttribute('aria-hidden', 'true');
+        box.appendChild(icon);
+        box.appendChild(el('p', 'card-detail',
+            state.message || '暂时无法给出建议，请稍后重试。'));
+        var retry = el('button', 'btn btn-quiet');
+        retry.type = 'button';
+        retry.appendChild(el('span', 'btn-text', '重试'));
+        retry.addEventListener('click', function () { submit(state.query); });
+        box.appendChild(retry);
+        return box;
+    }
+
+    function privacyNote() {
+        var box = el('div', 'chat-privacy');
+        var icon = el('span', 'chat-privacy-icon', 'ⓘ');
+        icon.setAttribute('aria-hidden', 'true');
+        box.appendChild(icon);
+        box.appendChild(el('span', null,
+            '本回答为本地规则建议，未调用外部模型，数据不出本机。'));
+        return box;
+    }
+
+    // ---- 行为 ----
+    function submit(rawQuery) {
+        if (busy) return;
+        var query = (rawQuery || '').trim();
+        if (!query) {
+            state.phase = 'idle';
+            state.message = '请先输入一个问题';
+            render();
+            announce('请先输入一个问题');
+            return;
+        }
+
+        busy = true;
+        state.query = query;
+        state.phase = 'loading';
+        state.message = '';
+        render();
+        announce('正在根据你的配置给出建议…');
+
+        var timedOut = false;
+        var controller = new AbortController();
+        var timer = window.setTimeout(function () {
+            timedOut = true;
+            controller.abort();
+        }, TIMEOUT_MS);
+
+        fetch(SUGGEST_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: query }),
+            cache: 'no-store',
+            signal: controller.signal
+        })
+            .then(function (response) {
+                return response.json().catch(function () { return null; });
+            })
+            .then(function (payload) {
+                if (!payload || payload.ok !== true) {
+                    state.phase = 'error';
+                    state.message = (payload && payload.error && payload.error.message) ||
+                        '暂时无法给出建议，请确认 aimodel 正在运行，然后重试。';
+                    announce('建议获取失败：' + state.message);
+                    return;
+                }
+                state.phase = 'result';
+                state.result = payload;
+                announce('已给出建议');
+            })
+            .catch(function () {
+                state.phase = 'error';
+                state.message = timedOut
+                    ? '建议请求超时，请重试。'
+                    : '暂时无法给出建议，请确认 aimodel 正在运行，然后重试。';
+                announce(state.message);
+            })
+            .then(function () {
+                window.clearTimeout(timer);
+                busy = false;
+                render();
+            });
+    }
+
+    // ---- 渲染 ----
+    function render() {
+        chatBody.textContent = '';
+        chatBody.appendChild(composer());
+
+        if (state.phase === 'loading') {
+            chatBody.appendChild(skeletonBlock());
+        } else if (state.phase === 'result' && state.result) {
+            chatBody.appendChild(resultNode(state.result));
+        } else if (state.phase === 'error') {
+            chatBody.appendChild(errorNode());
+        } else {
+            chatBody.appendChild(examples());
+            if (state.message) {
+                chatBody.appendChild(el('div', 'card-detail', state.message));
+            }
+        }
+
+        chatBody.appendChild(privacyNote());
+    }
+
+    render();
+})();

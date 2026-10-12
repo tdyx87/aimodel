@@ -475,3 +475,163 @@ body {
     padding: var(--space-1) var(--space-3);
     font-size: 12px;
 }
+
+/* ---- 聊天/推荐（design/screens/chat-recommend.md）---- */
+
+/* 输入区：输入框 + 发送按钮 */
+.chat-composer {
+    display: flex;
+    gap: var(--space-2);
+    align-items: stretch;
+}
+
+.chat-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+}
+
+.chat-input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.chat-send {
+    flex: none;
+}
+
+/* 快捷问题：降低首用门槛 */
+.chat-examples {
+    margin-top: var(--space-3);
+}
+
+.chat-examples-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: var(--space-2);
+}
+
+.chat-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+.chip {
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.chip:hover {
+    border-color: var(--accent);
+}
+
+.chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+/* 结果区 */
+.chat-result {
+    margin-top: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+/* 分类徽标：色 + 文字并存（design-system §7） */
+.chat-badge {
+    align-self: flex-start;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-control);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.chat-badge.is-ok {
+    color: var(--success);
+    border-color: var(--success);
+}
+
+.chat-badge.is-warn {
+    color: var(--warn);
+    border-color: var(--warn);
+}
+
+.chat-badge.is-bad {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+.chat-reason {
+    margin: 0;
+    line-height: 1.7;
+    color: var(--text);
+}
+
+.chat-section-title {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: var(--space-2);
+}
+
+.chat-steps {
+    margin: 0;
+    padding-left: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.chat-step-title {
+    font-weight: 600;
+}
+
+.chat-step-detail {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.chat-step-action {
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.chat-error {
+    margin-top: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    text-align: center;
+}
+
+/* 隐私说明：常驻结果区底部 */
+.chat-privacy {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.chat-privacy-icon {
+    flex: none;
+}
+

@@ -1,12 +1,14 @@
 // 平台无关：请求解析、路由、静态资源服务、线程编排。
 // 套接字操作经 HttpServerImpl（平台文件实现）；本文件三平台无差别编译。
 
+#include "aimodel/chat_suggest.h"
 #include "aimodel/file_transfer.h"
 #include "aimodel/http_server.h"
 
 #include "aimodel/system_info.h"
 #include "http_server_impl.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstdio>
 #include <fstream>
@@ -189,6 +191,117 @@ std::string ExtractQueryParam(const std::string& raw_path,
     return std::string();
 }
 
+// 把一个 Unicode 码点编码为 UTF-8 追加到 out（用于解析 JSON 的 \uXXXX 转义）。
+void AppendUtf8(unsigned int code_point, std::string* out) {
+    if (code_point <= 0x7Fu) {
+        out->push_back(static_cast<char>(code_point));
+    } else if (code_point <= 0x7FFu) {
+        out->push_back(static_cast<char>(0xC0u | (code_point >> 6)));
+        out->push_back(static_cast<char>(0x80u | (code_point & 0x3Fu)));
+    } else if (code_point <= 0xFFFFu) {
+        out->push_back(static_cast<char>(0xE0u | (code_point >> 12)));
+        out->push_back(static_cast<char>(0x80u | ((code_point >> 6) & 0x3Fu)));
+        out->push_back(static_cast<char>(0x80u | (code_point & 0x3Fu)));
+    } else {
+        out->push_back(static_cast<char>(0xF0u | (code_point >> 18)));
+        out->push_back(static_cast<char>(0x80u | ((code_point >> 12) & 0x3Fu)));
+        out->push_back(static_cast<char>(0x80u | ((code_point >> 6) & 0x3Fu)));
+        out->push_back(static_cast<char>(0x80u | (code_point & 0x3Fu)));
+    }
+}
+
+// 解析 4 位十六进制（\uXXXX 的 XXXX 部分）。
+bool ParseHex4(const std::string& s, size_t pos, unsigned int* value) {
+    if (pos + 4 > s.size()) return false;
+    unsigned int v = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        const char c = s[pos + i];
+        unsigned int d = 0;
+        if (c >= '0' && c <= '9') {
+            d = static_cast<unsigned int>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            d = static_cast<unsigned int>(c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F') {
+            d = static_cast<unsigned int>(c - 'A' + 10);
+        } else {
+            return false;
+        }
+        v = (v << 4) | d;
+    }
+    *value = v;
+    return true;
+}
+
+// 从 JSON 请求体提取字符串字段值（仅覆盖契约内的简单请求体 {"query":"..."}）。
+// 找不到字段、值不是字符串、或转义非法时返回空串（由上层按 INVALID_QUERY 处理）。
+// 支持 \" \\ \/ \b \f \n \r \t 与 \uXXXX（含 UTF-16 代理对）。
+std::string ExtractJsonStringField(const std::string& body,
+                                   const std::string& key) {
+    const std::string needle = "\"" + key + "\"";
+    size_t pos = body.find(needle);
+    if (pos == std::string::npos) return std::string();
+    pos += needle.size();
+    while (pos < body.size() &&
+           std::isspace(static_cast<unsigned char>(body[pos])) != 0) {
+        ++pos;
+    }
+    if (pos >= body.size() || body[pos] != ':') return std::string();
+    ++pos;
+    while (pos < body.size() &&
+           std::isspace(static_cast<unsigned char>(body[pos])) != 0) {
+        ++pos;
+    }
+    if (pos >= body.size() || body[pos] != '"') return std::string();
+    ++pos;
+
+    std::string out;
+    while (pos < body.size()) {
+        const char c = body[pos];
+        if (c == '"') break;  // 字符串结束
+        if (c == '\\') {
+            if (pos + 1 >= body.size()) return std::string();
+            const char esc = body[pos + 1];
+            pos += 2;
+            switch (esc) {
+                case '"':  out.push_back('"');  break;
+                case '\\': out.push_back('\\'); break;
+                case '/':  out.push_back('/');  break;
+                case 'b':  out.push_back('\b'); break;
+                case 'f':  out.push_back('\f'); break;
+                case 'n':  out.push_back('\n'); break;
+                case 'r':  out.push_back('\r'); break;
+                case 't':  out.push_back('\t'); break;
+                case 'u': {
+                    unsigned int cp = 0;
+                    if (!ParseHex4(body, pos, &cp)) return std::string();
+                    pos += 4;
+                    // UTF-16 代理对：高位 D800-DBFF 后须跟低位 DC00-DFFF。
+                    if (cp >= 0xD800u && cp <= 0xDBFFu) {
+                        if (pos + 2 > body.size() || body[pos] != '\\' ||
+                            body[pos + 1] != 'u') {
+                            return std::string();
+                        }
+                        pos += 2;
+                        unsigned int low = 0;
+                        if (!ParseHex4(body, pos, &low)) return std::string();
+                        pos += 4;
+                        if (low < 0xDC00u || low > 0xDFFFu) return std::string();
+                        cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
+                    }
+                    AppendUtf8(cp, &out);
+                    break;
+                }
+                default:
+                    return std::string();  // 非法转义
+            }
+            continue;
+        }
+        out.push_back(c);
+        ++pos;
+    }
+    return out;
+}
+
 // FileError → 契约第 5 节的错误码字符串。
 const char* FileErrorCodeString(FileError code) {
     switch (code) {
@@ -346,6 +459,33 @@ std::string HandleRequest(const std::string& method, const std::string& raw_path
         return os.str();
     }
     if (path.compare(0, 10, "/api/file/") == 0) {
+        return BuildResponse(405, "Method Not Allowed",
+                             "application/json; charset=utf-8",
+                             "{\"ok\":false,\"code\":\"METHOD_NOT_ALLOWED\","
+                             "\"message\":\"不支持的请求方法。\"}");
+    }
+    // ---- 聊天/推荐 API（契约 docs/design/chat-system-contract.md）----
+    // 本地规则式建议：GET 能力说明 + POST 建议；数据不出本机（隐私红线）。
+    if (path == "/api/chat/capability" && method == "GET") {
+        return BuildResponse(200, "OK", "application/json; charset=utf-8",
+                             ChatCapabilityJson());
+    }
+    if (path == "/api/chat/suggest" && method == "POST") {
+        const std::string query = ExtractJsonStringField(body, "query");
+        try {
+            const SystemInfo info = GetSystemInfo();
+            const ChatAdvice advice = BuildChatAdvice(info, query);
+            return BuildResponse(200, "OK", "application/json; charset=utf-8",
+                                 ChatAdviceToJson(info, query, advice));
+        } catch (...) {
+            // 采集/序列化异常：按契约 §4 返回用户语言错误，不暴露技术细节。
+            return BuildResponse(
+                200, "OK", "application/json; charset=utf-8",
+                "{\"ok\":false,\"error\":{\"code\":\"UNEXPECTED_ERROR\","
+                "\"message\":\"请求失败，请稍后重试。\"}}");
+        }
+    }
+    if (path.compare(0, 10, "/api/chat/") == 0) {
         return BuildResponse(405, "Method Not Allowed",
                              "application/json; charset=utf-8",
                              "{\"ok\":false,\"code\":\"METHOD_NOT_ALLOWED\","
