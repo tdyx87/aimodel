@@ -166,10 +166,13 @@ void CollectDisks(SystemInfo* info) {
         disk.mount_point = WideToUtf8(std::wstring(p));
 
         ULARGE_INTEGER free_bytes_available, total_bytes, total_free_bytes;
-        if (::GetDiskFreeSpaceExW(p, &free_bytes_available, &total_bytes, &total_free_bytes)) {
-            disk.total_bytes = total_bytes.QuadPart;
-            disk.free_bytes = total_free_bytes.QuadPart;
+        // 容量查询失败（空光驱/未就绪的读卡器/不可访问卷）时不入列：
+        // 否则会产出 total_bytes=0 的条目，界面显示 0 B 且违反测试不变量。
+        if (!::GetDiskFreeSpaceExW(p, &free_bytes_available, &total_bytes, &total_free_bytes)) {
+            continue;
         }
+        disk.total_bytes = total_bytes.QuadPart;
+        disk.free_bytes = total_free_bytes.QuadPart;
         wchar_t fs_name[MAX_PATH + 1] = {0};
         if (::GetVolumeInformationW(p, NULL, 0, NULL, NULL, NULL, fs_name, MAX_PATH)) {
             disk.file_system = WideToUtf8(std::wstring(fs_name));
