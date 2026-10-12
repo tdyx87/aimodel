@@ -45,7 +45,8 @@ endif ()
 # 共同部分（三平台）
 target_sources(aimodel PRIVATE
     src/cpp/system_info.cpp
-    src/cpp/http_server.cpp)
+    src/cpp/http_server.cpp
+    src/cpp/file_transfer.cpp)
 # 平台差异实现（编译期隔离）
 if (WIN32)
     target_sources(aimodel PRIVATE src/cpp/system_info_win32.cpp src/cpp/http_server_win32.cpp)
