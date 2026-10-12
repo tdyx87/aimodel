@@ -105,8 +105,14 @@ if (AIMODEL_BUILD_TESTS)
     target_link_libraries(system_info_test PRIVATE aimodel GTest::gtest_main)
     target_compile_options(system_info_test PRIVATE ${AIMODEL_WARN_FLAGS})
 
+    # 文件传输（file_transfer）单测：覆盖路径穿越、保留名、危险扩展名、大小上限
+    add_executable(file_transfer_test tests/file_transfer_test.cpp)
+    target_link_libraries(file_transfer_test PRIVATE aimodel GTest::gtest_main)
+    target_compile_options(file_transfer_test PRIVATE ${AIMODEL_WARN_FLAGS})
+
     include(GoogleTest)
     gtest_discover_tests(system_info_test)
+    gtest_discover_tests(file_transfer_test)
 endif ()
 
 # ---- 安装 ----

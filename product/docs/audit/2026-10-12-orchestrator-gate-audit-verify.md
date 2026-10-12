@@ -42,11 +42,14 @@
 | 角色 | 审计产物 | 内容 | 状态 |
 |---|---|---|---|
 | `cpp-implementer` | `2026-10-12-cpp-implementer-fix-msvc-compile.md` | 修复 MSVC 编译失败，零警告、`ctest` 10/10 | ✅ 留痕 |
-| `test-engineer` | 待补（此前该角色始终无审计） | 需根据 §2 产物写 E2E 复核 | ⏳ 待摆 |
-| `security-reviewer` | 待补 | 需记录输入/判断/结论/复核 | ⏳ 待摆 |
+| `cpp-implementer` | `2026-10-12-cpp-implementer-file-transfer-impl.md` | 修复 `file_transfer.cpp` 编译失败（4 函数体错位 + 误用 `<filesystem>`），补安全校验与 14 用例，零警告、`ctest` 24/24 | ✅ 留痕（复核通过） |
+| `reviewer` | `2026-10-12-reviewer-file-transfer-cpp.md` | C++ 清单六项全绿，`✅ 通过`，遗留 1 项 🟡（TOCTOU） | ✅ 留痕（复核通过） |
+| `security-reviewer` | `2026-10-12-security-reviewer-file-transfer.md` | 隐私红线实测干净；修 1 项 High（尾随空格绕过）；无 Critical/High，`✅ 通过` | ✅ 留痕（复核通过） |
+| `test-engineer` | 待补（此前该角色始终无审计） | 需做三平台复核（Linux/macOS 的 `opendir`/`mkdir` 分支未实测）+ 用户场景 E2E | ⏳ 待摆 |
 
-> 结论：G2 条件为 **全绿**。当前 `reviewer` 与 `test-engineer`/`security-reviewer`
-> 已有审计，`test-engineer` 与 `security-reviewer` 审计待补写。
+> 结论：**file-transfer 特性的 G2 + G3 安全项已闭合**（`cpp-implementer` → `reviewer` ✅ → `security-reviewer` ✅ 无 Critical/High，三份审计均经 orchestrator 抽检复核回写）。
+> **G3 尚未完全闭合**——`test-engineer` 仍无审计，且三平台验证缺失。
+> **功能门禁未闭合**——`FileTransfer` 库层已可交付，但 HTTP 层未接线（`/api/file/*` 仍 404）、前端无交互，功能对用户尚不可见。
 
 **审计复核（代表）**：抽检 1 份 `product-manager` 的 PRD 审计，确认：
 
@@ -86,8 +89,10 @@ G1 依赖 PRD/契约/界面稿审计，G2/G3 依赖检验/安全审计（待补�
 
 ## 6. 复核记录（orchestrator）
 
-- 复核人/时间：orchestrator / 2026-10-12
-- 方式：对 `product/docs/audit/2026-10-12-cpp-implementer-fix-msvc-compile.md`
-  抽检，核对「产出」「关键决策」「结论」
-- 结果：✅ 通过（**待** `test-engineer`/`security-reviewer` 补审计后，重跑 G2/G3
-  并抽检其审计）
+- 复核人/时间：orchestrator / 2026-10-12 21:35
+- 方式：按 §6.6「非自证」要求，对本轮新增的三份审计逐份抽检，核对「产出」「关键决策」「结论」
+- 抽检范围与结果：
+  - `cpp-implementer-file-transfer-impl.md`：实测 `ctest` 24/24、零警告，与声明一致；关键决策（弃 `<filesystem>`、路径整体拒绝、10MB）理由均可回溯至 `CMakeLists.txt:12`、契约 §6.2/§6.4 与单测反证 → `✅ 通过`
+  - `reviewer-file-transfer-cpp.md`：复现其 3 项 grep 证据（0 运行时平台判断、0 裸 new/delete、0 超宽行）→ `✅ 通过`
+  - `security-reviewer-file-transfer.md`：复现隐私红线 grep（仅 `snprintf`）；4 个安全用例实测 Passed，确证 High 已修 → `✅ 通过`
+- 遗留登记：`test-engineer` 审计与三平台验证缺失（G3 未完全闭合）；HTTP/前端未接线（功能门禁未闭合）；2 项 Medium（TOCTOU、`ListUploads` 暴露面）为 HTTP 接线的前置条件

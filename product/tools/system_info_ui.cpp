@@ -37,6 +37,7 @@ void PrintHelp(const char* prog) {
                "  --port N       监听端口（默认 0 = 系统分配，启动后打印真实端口）\n"
                "  --no-open      启动后不自动打开浏览器\n"
                "  --web-root DIR 静态资源目录（默认：与可执行文件同级的 web）\n"
+               "  --uploads-root DIR 文件上传授权目录（默认：data/uploads）\n"
                "  --help         显示本帮助\n",
                stdout);
 }
@@ -47,6 +48,7 @@ int main(int argc, char* argv[]) {
     int port = 0;
     bool no_open = false;
     std::string web_root = "web";
+    std::string uploads_root;  // 空 = 用 FileTransfer 的默认 data/uploads
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -67,6 +69,12 @@ int main(int argc, char* argv[]) {
                 return 2;
             }
             web_root = argv[++i];
+        } else if (arg == "--uploads-root") {
+            if (i + 1 >= argc) {
+                std::fputs("错误：--uploads-root 需要一个目录参数\n", stderr);
+                return 2;
+            }
+            uploads_root = argv[++i];
         } else {
             std::string unknown = std::string("未知选项：") + argv[i] + "\n";
             std::fputs(unknown.c_str(), stderr);
@@ -78,6 +86,7 @@ int main(int argc, char* argv[]) {
     config.bind_host = "127.0.0.1";
     config.port = port;
     config.static_root = web_root;
+    config.uploads_root = uploads_root;
 
     aimodel::LocalServer server;
     std::string error;
