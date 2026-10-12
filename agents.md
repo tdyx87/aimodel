@@ -37,7 +37,7 @@ aimodel/
 ├─ src/cpp/             # C++ 核心源码（cpp-implementer 维护）
 ├─ include/aimodel/     # C++ 对外头文件
 ├─ python/              # Python 绑定与脚本（python-implementer 维护）
-├─ web/                 # 演示前端（frontend-implementer 维护）
+├─ web/                 # 产品前端：用户主界面，产品本体非演示（frontend-implementer 维护）
 ├─ design/              # 设计资产：设计系统、界面稿（ui-designer 维护）
 ├─ tests/               # 单元测试（与 src/cpp/ 对应）
 ├─ third_party/         # 第三方源码（只读）
