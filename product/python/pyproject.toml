@@ -12,7 +12,11 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest==7.4.4"]
+# pytest-timeout 不是可选项：下面的 [tool.pytest.ini_options] 声明了 timeout，
+# 而缺了插件时该配置**会被静默忽略**（只报 PytestConfigWarning）。E2E 要拉起
+# 真实可执行文件与浏览器，没有超时保护时一次挂死就能把门禁卡到天亮。
+# 用 >= 而非 ==：本插件与 pytest 7/8/9 均兼容，锁死小版本只会互相打架。
+dev = ["pytest==7.4.4", "pytest-timeout>=2.3"]
 
 [tool.setuptools.packages.find]
 where = ["."]

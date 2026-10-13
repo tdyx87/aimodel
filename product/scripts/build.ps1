@@ -49,20 +49,54 @@ if (-not $NoTests) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-# Python 内部工具链的用例（pytest）。跳过条件：未装 pytest 或显式关闭。
+# ---- Python 层：内部工具链单测 + 用户场景 E2E（一次 pytest 跑两层）----
+# testpaths 已在 python/pyproject.toml 声明为 ["tests", "../tests/e2e"]：E2E 从
+# **真实可执行文件**启动，与链接库的单测覆盖面不同，因此必须从 python/ 目录
+# 跑 pytest；拆成两条命令会把 E2E 跑两遍。
+#
+# 解释器优先级：$env:PYTHON 显式指定 > 项目内 .venv > PATH 上的 python/python3。
+# 项目内 venv 优先很重要：系统 python 往往没装 pytest。
+#
+# 缺 python/pytest 时**不静默跳过**：静默跳过正是「产物层其实零覆盖、
+# 却被当成全绿」的来源。要跳过请显式传 -NoPythonTests。
+$py = $env:PYTHON
+if (-not $py) {
+    $venvPy = Join-Path $Root ".venv\Scripts\python.exe"
+    if (Test-Path $venvPy) { $py = $venvPy }
+}
+if (-not $py) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($cmd) { $py = $cmd.Source }
+}
+
 if (-not $NoPythonTests) {
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
-    if ($python) {
-        Push-Location (Join-Path $Root "python")
-        try {
-            & $python.Source -m pytest -q
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        } finally {
-            Pop-Location
-        }
-    } else {
-        Write-Host "跳过 Python 用例：未找到 python"
+    if (-not $py) {
+        Write-Host "错误：未找到 python，Python 层用例（内部工具链单测 + 真实产物 E2E）未运行。"
+        Write-Host "      安装 python 后重试，或显式传 -NoPythonTests 跳过。"
+        exit 1
+    }
+    # 探测 pytest 是否可用。
+    # **不能**写成 `& $py -c "import pytest" 2>&1`：$ErrorActionPreference = "Stop"
+    # 下，被重定向进成功流的原生 stderr 会被抛成 NativeCommandError（终止错误），
+    # 脚本当场中断，下面这段友好提示根本执行不到。
+    # find_spec 只查可导入性、不触发导入，也就**不产生 stderr**，从根上避开该陷阱。
+    & $py -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('pytest') else 1)"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "错误：$py 未安装 pytest，Python 层用例（含 E2E）未运行。"
+        Write-Host ('      修复：& "' + $py + '" -m pip install -e "' + $Root + '\python[dev]"')
+        Write-Host "      或显式传 -NoPythonTests 跳过（会让产物层零覆盖）。"
+        exit 1
+    }
+    Push-Location (Join-Path $Root "python")
+    try {
+        # 不再额外传 -q：pyproject 的 addopts 已有 -q，再传一次成了 -qq，
+        # 连「N passed」的结论行都被抑制。构建脚本的用途就是留下门禁证据，
+        # 结论行必须可见。
+        & $py -m pytest
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        Pop-Location
     }
 }
 

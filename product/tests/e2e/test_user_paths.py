@@ -164,35 +164,45 @@ def _wait_until_listening(port: int, proc: "subprocess.Popen") -> None:
 # 路径 1：首屏空态（DOM 级 —— 真实浏览器渲染）
 # ---------------------------------------------------------------------------
 
-def _find_browser() -> Optional[Path]:
-    for name in ("msedge", "chrome", "chromium", "google-chrome"):
+def _browser_candidates() -> list:
+    """按可靠度排序的候选浏览器列表。
+
+    为什么是「列表」而不是「第一个命中的」：本机实测同一条命令行参数下，
+    Edge 存在但 `--headless --dump-dom` **静默产出空文件**（退出码 0、零字节、
+    零 DOM），而 Chrome 正常。若只取第一个命中项，DOM 级验证的结果就取决于
+    「机器上装了哪个浏览器、哪个先被 which 命中」——测试随机报红，比不覆盖更坏。
+    """
+    candidates: list = []
+    for name in ("chrome", "chromium", "google-chrome", "msedge"):
         found = shutil.which(name)
         if found:
-            return Path(found)
+            candidates.append(Path(found))
     for raw in (
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     ):
         if os.path.exists(raw):
-            return Path(raw)
-    return None
+            candidates.append(Path(raw))
+    seen: set = set()
+    unique: list = []
+    for path in candidates:
+        key = str(path).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
 
 
-def test_empty_state_renders_in_real_browser(server: LiveServer, tmp_path: Path) -> None:
-    """首屏空态：真实浏览器渲染后的 DOM 必须含用户可见文案与可访问性属性。
+def _dump_dom(browser: Path, url: str, tmp_path: Path, tag: str) -> str:
+    """用真实浏览器渲染并导出 DOM。未产出返回空串（本机 headless 不可用）。
 
-    PRD NFR-1「启动后 2 秒内可交互」的界面侧体现。
+    --user-data-dir 必须给独立目录：共用默认 profile 时，浏览器会因 profile 锁
+    与后台进程而**不自行退出**（--dump-dom 已写完但进程挂着）。
     """
-    browser = _find_browser()
-    if browser is None:
-        pytest.skip("环境无 Chrome/Edge，跳过 DOM 级验证（HTTP 级验证见其余用例）")
-
-    dom_path = tmp_path / "dom.html"
-    profile = tmp_path / "edge-profile"
-
-    # --user-data-dir 必须给独立目录：共用默认 profile 时，Edge 会因 profile 锁
-    # 与后台进程而**不自行退出**（--dump-dom 已写完但进程挂着）。
+    dom_path = tmp_path / ("dom-%s.html" % tag)
+    profile = tmp_path / ("profile-%s" % tag)
     argv = [
         str(browser),
         "--headless",
@@ -204,10 +214,8 @@ def test_empty_state_renders_in_real_browser(server: LiveServer, tmp_path: Path)
         f"--user-data-dir={profile}",
         "--virtual-time-budget=5000",
         "--dump-dom",
-        f"http://127.0.0.1:{server.port}/",
+        url,
     ]
-
-    dom = ""
     with dom_path.open("wb") as sink:
         proc = subprocess.Popen(argv, stdout=sink, stderr=subprocess.DEVNULL)
         try:
@@ -217,7 +225,32 @@ def test_empty_state_renders_in_real_browser(server: LiveServer, tmp_path: Path)
             # 判定标准是 DOM 内容，不是进程退出码。
             proc.kill()
             proc.wait(timeout=10)
-    dom = dom_path.read_text(encoding="utf-8", errors="replace")
+    if not dom_path.exists():
+        return ""
+    return dom_path.read_text(encoding="utf-8", errors="replace")
+
+
+def test_empty_state_renders_in_real_browser(server: LiveServer, tmp_path: Path) -> None:
+    """首屏空态：真实浏览器渲染后的 DOM 必须含用户可见文案与可访问性属性。
+
+    PRD NFR-1「启动后 2 秒内可交互」的界面侧体现。
+    """
+    candidates = _browser_candidates()
+    if not candidates:
+        pytest.skip("环境无 Chrome/Edge，跳过 DOM 级验证（HTTP 级验证见其余用例）")
+
+    dom = ""
+    for index, browser in enumerate(candidates):
+        dom = _dump_dom(browser, f"http://127.0.0.1:{server.port}/", tmp_path, str(index))
+        if dom:
+            break
+    if not dom:
+        # 空 DOM 只可能来自「浏览器自己没产出」：页面加载失败时 --dump-dom 仍会
+        # 输出错误页 DOM。故这是环境能力缺口，如实跳过而不是把它记成界面缺陷。
+        pytest.skip(
+            "候选浏览器均未产出 DOM（本机 headless 不可用）："
+            + ", ".join(str(b) for b in candidates)
+        )
 
     assert dom, "浏览器未产出 DOM"
     # 用户可见文案

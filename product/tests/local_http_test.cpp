@@ -141,19 +141,9 @@ std::string MakeMinimalSave() {
     return header + table + slot + std::string(kFooter, 8);
 }
 
-class LocalHttpTest : public ::testing::Test {
+// 建请求/发请求的公共部分，两个夹具只差 static_root。
+class HttpFixture : public ::testing::Test {
 protected:
-    void SetUp() {
-        saveinspector::ServerConfig config;
-        config.bind_host = "127.0.0.1";
-        config.port = 0;
-        config.static_root.clear();
-        // 缩短读超时：请求体截断用例要靠它触发，不能等满 5 秒。
-        config.request_timeout_ms = 250;
-        ASSERT_TRUE(server_.Start(config, &error_)) << error_;
-        ASSERT_GT(server_.bound_port(), 0);
-    }
-
     void TearDown() { server_.Stop(); }
 
     // 发一个请求，返回原始响应。body 为空表示不带请求体。
@@ -190,6 +180,43 @@ protected:
 
     saveinspector::LocalHttpServer server_;
     std::string error_;
+};
+
+// 夹具 A：**不**配 static_root（闸门、请求体完整性、业务接口用例）。
+class LocalHttpTest : public HttpFixture {
+protected:
+    void SetUp() {
+        saveinspector::ServerConfig config;
+        config.bind_host = "127.0.0.1";
+        config.port = 0;
+        config.static_root.clear();
+        // 缩短读超时：请求体截断用例要靠它触发，不能等满 5 秒。
+        config.request_timeout_ms = 250;
+        ASSERT_TRUE(server_.Start(config, &error_)) << error_;
+        ASSERT_GT(server_.bound_port(), 0);
+    }
+};
+
+// 夹具 B：**配** static_root，覆盖静态资源分支。
+//
+// 为什么单独立一个夹具（历史缺口）：本文件此前所有夹具都清空 static_root，
+// 于是「GET / → 读文件 → 回 200」这条分支在单测里**一次都没被执行过**。
+// 实测该分支出过「整个服务进程死亡」的故障（MinGW 下按 PATH 解析到 ABI 不
+// 匹配的 libstdc++ 运行库，首个静态资源请求即 SIGSEGV），而那时 API 用例
+// 全绿——覆盖缺口正是它能溜过 G3 的原因。
+class LocalHttpStaticTest : public HttpFixture {
+protected:
+    void SetUp() {
+        saveinspector::ServerConfig config;
+        config.bind_host = "127.0.0.1";
+        config.port = 0;
+#ifdef SAVEINSPECTOR_TEST_WEB_DIR
+        config.static_root = SAVEINSPECTOR_TEST_WEB_DIR;
+#endif
+        config.request_timeout_ms = 500;
+        ASSERT_TRUE(server_.Start(config, &error_)) << error_;
+        ASSERT_GT(server_.bound_port(), 0);
+    }
 };
 
 }  // namespace
@@ -313,6 +340,61 @@ TEST_F(LocalHttpTest, UnknownApiReturnsNotFound) {
 TEST_F(LocalHttpTest, PathTraversalOnStaticIsRejected) {
     EXPECT_EQ(StatusOf(Send("GET /../../../Windows/win.ini HTTP/1.1\r\n" + Host() + "\r\n")),
               404);
+}
+
+// ---------------------------------------------------------------------------
+// 静态资源（配 static_root）
+// ---------------------------------------------------------------------------
+
+TEST_F(LocalHttpStaticTest, ServesIndexAtRootWithSecurityHeaders) {
+    const std::string response = Send("GET / HTTP/1.1\r\n" + Host() + "\r\n");
+    ASSERT_EQ(StatusOf(response), 200) << response;
+    EXPECT_NE(response.find("Content-Type: text/html"), std::string::npos) << response;
+    // 中文界面不得乱码
+    EXPECT_NE(response.find("charset=utf-8"), std::string::npos) << response;
+    // 存档数据一律不进缓存，且不允许浏览器嗅探类型
+    EXPECT_NE(response.find("Cache-Control: no-store"), std::string::npos) << response;
+    EXPECT_NE(response.find("X-Content-Type-Options: nosniff"), std::string::npos) << response;
+    EXPECT_FALSE(BodyOf(response).empty()) << "根路径返回了空正文";
+}
+
+TEST_F(LocalHttpStaticTest, ServesEachAssetWithMatchingContentType) {
+    const char* kAssets[][2] = {
+        {"/index.html", "text/html"},
+        {"/app.js", "text/javascript"},
+        {"/styles.css", "text/css"},
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        const std::string path = kAssets[i][0];
+        const std::string expect = kAssets[i][1];
+        const std::string response = Send("GET " + path + " HTTP/1.1\r\n" + Host() + "\r\n");
+        ASSERT_EQ(StatusOf(response), 200) << path << ": " << response;
+        EXPECT_NE(response.find("Content-Type: " + expect), std::string::npos)
+            << path << ": " << response;
+        EXPECT_FALSE(BodyOf(response).empty()) << path << " 返回空正文";
+    }
+}
+
+TEST_F(LocalHttpStaticTest, MissingAssetAndUnknownExtensionAreNotFound) {
+    // 存在扩展名但文件不在 → 404
+    EXPECT_EQ(StatusOf(Send("GET /nope.js HTTP/1.1\r\n" + Host() + "\r\n")), 404);
+    // 扩展名不在白名单（MimeForPath 返回 NULL）→ 404，不猜测类型回 200
+    EXPECT_EQ(StatusOf(Send("GET /payload.bin HTTP/1.1\r\n" + Host() + "\r\n")), 404);
+}
+
+TEST_F(LocalHttpStaticTest, TraversalStillRejectedWhenStaticRootConfigured) {
+    // 夹具 A 的用例在 static_root 为空时也会 404，掩盖了「消毒是否真的生效」；
+    // 配上真实目录后这条断言才真正有意义。
+    EXPECT_EQ(StatusOf(Send("GET /../../CMakeLists.txt HTTP/1.1\r\n" + Host() + "\r\n")),
+              404);
+    EXPECT_EQ(StatusOf(Send("GET /%2e%2e/%2e%2e/CMakeLists.txt HTTP/1.1\r\n" + Host() +
+                            "\r\n")),
+              404);
+}
+
+TEST_F(LocalHttpStaticTest, ApiRoutesStillWinOverStaticFiles) {
+    // /api/ 前缀先于静态分支命中：不得因为 web/ 里存在同名文件而改走静态读取。
+    EXPECT_EQ(StatusOf(Send("GET /api/save/slots HTTP/1.1\r\n" + Host() + "\r\n")), 409);
 }
 
 // ---------------------------------------------------------------------------

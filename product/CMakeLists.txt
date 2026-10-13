@@ -73,6 +73,21 @@ endif ()
 
 target_compile_options(saveinspector PRIVATE ${SAVEINSPECTOR_WARN_FLAGS})
 
+# ---- MinGW/GCC 可执行文件的自包含性（必做，非优化）----
+# GCC 默认**动态**链接 libstdc++/libgcc，运行时由加载器按 PATH（及同目录）顺序
+# 解析 libstdc++-6.dll。只要 PATH 上先出现另一个 GCC 发行版的同名 DLL——
+# 典型如 Git for Windows 的 mingw64/bin——进程就会加载 ABI 不匹配的运行库。
+#
+# 实测后果（本机窗口，退出码 0xC0000005）：首个**静态资源**请求即在 libstdc++
+# 内 SIGSEGV，服务进程直接死亡，界面对用户完全不可用；而 API 路径恰好不崩，
+# 于是「接口测得通」掩盖了「页面打不开」。同一份二进制换台机器/换个 PATH
+# 顺序就换一个结果，是最难查的一类缺陷。
+#
+# 静态链接 libgcc/libstdc++ 后产物自包含，不再依赖 PATH 上恰好是构建时的
+# 那一份 DLL。libwinpthread-1.dll 仍为动态（该工具链只提供 DLL，无静态库），
+# 但它是稳定的 C API，不受 C++ ABI 差异影响。
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+
 # ---- 工具 ----
 if (SAVEINSPECTOR_BUILD_TOOLS)
     add_executable(save_inspector_cli tools/save_inspector_cli.cpp)
@@ -119,6 +134,11 @@ if (SAVEINSPECTOR_BUILD_TESTS)
     # HTTP 层单测：起真实本地服务 + 裸 socket 客户端。
     # 闸门（Host/Origin/Content-Type）、请求体截断、状态码无法在库层断言。
     add_executable(local_http_test tests/local_http_test.cpp)
+    # 静态资源分支需要一个**真实存在**的 web 目录才能被覆盖：此前夹具一律
+    # 清空 static_root，于是「配了 static_root 的静态资源」长期零覆盖。
+    # 直接指向源码树里的 web/，不拷贝、不造临时目录。
+    target_compile_definitions(local_http_test PRIVATE
+        SAVEINSPECTOR_TEST_WEB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/web")
     if (WIN32)
         target_link_libraries(local_http_test PRIVATE saveinspector GTest::gtest_main ws2_32)
     else ()

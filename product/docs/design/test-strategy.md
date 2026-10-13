@@ -13,9 +13,9 @@
 | 层 | 位置 | 数量 | 覆盖什么 | 不覆盖什么 |
 |----|------|------|---------|-----------|
 | 库层单测 | `tests/save_inspector_test.cpp` | 21 | 格式解析、版本迁移、CRC64、损坏判定、资源耗尽防护 | HTTP 拼装、界面 |
-| HTTP 层单测 | `tests/local_http_test.cpp` | 15 | 请求闸门、请求体完整性、状态码、并发与 Stop | 真实可执行文件、界面 |
+| HTTP 层单测 | `tests/local_http_test.cpp` | 20 | 请求闸门、请求体完整性、状态码、**静态资源（含配 `static_root` 的读取、MIME、路径消毒）**、并发与 Stop | 真实可执行文件、界面 |
 | 内部工具单测 | `python/tests/test_save_format.py` | 21 | Python 参考实现是否符合契约 | C++ 侧行为 |
-| 用户场景 E2E | `tests/e2e/test_user_paths.py` | 17 | **真实可执行文件** → 真实 HTTP → 用户可见结果 | DOM 交互流 |
+| 用户场景 E2E | `tests/e2e/test_user_paths.py` | 20 | **真实可执行文件** → 真实 HTTP → 用户可见结果 | DOM 交互流 |
 
 > 边界原则：每层只断言本层负责的事。库层不测 HTTP（那里没有 HTTP），
 > E2E 不断言内部字段（那会把实现细节写死成契约）。
@@ -102,12 +102,31 @@ E2E 从 `save_inspector_ui` 可执行文件启动，经真实 TCP 走契约 §4 
 ## 7. 执行方式
 
 ```powershell
-# Windows：一条命令跑全流程（C++ + Python 格式用例 + E2E）
+# Windows：一条命令跑全流程（CMake 构建 + ctest + Python 层）
 ./scripts/build.ps1 -Config Release
-
-# 只跑 E2E
-cd python; pytest ../tests/e2e -v
 ```
+
+```bash
+# Linux / macOS
+./scripts/build.sh Release
+```
+
+一次 `pytest` 就能同时跑到内部工具单测与用户场景 E2E：`python/pyproject.toml`
+的 `testpaths` 已声明 `["tests", "../tests/e2e"]`。因此**必须从 `python/` 目录
+执行**，否则只收集到其中一层：
+
+```powershell
+cd python; pytest -q                # 21 格式 + 20 E2E
+cd python; pytest ../tests/e2e -v   # 只跑 E2E
+```
+
+Python 层需要 `pytest`；E2E 的超时保护还需要 `pytest-timeout`（两者都在
+`python/pyproject.toml` 的 `dev` extra 里声明）。两个构建脚本按
+`$PYTHON` → 项目内 `.venv` → PATH 的顺序挑选解释器；**缺 python/pytest 时脚本
+报错退出，而不是静默跳过**——静默跳过等于「产物层其实零覆盖、却显示全绿」，
+本项目正是这样漏掉过一次产物崩溃（见审计
+`2026-10-13-cpp-implementer-mingw-runtime-crash.md`）。要主动跳过请显式传
+`--no-python-tests` / `-NoPythonTests`。
 
 E2E 依赖已构建的可执行文件；未构建时**自动 skip 而非失败**，避免在只跑
 单测的场景里产生噪声。
