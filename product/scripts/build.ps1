@@ -1,12 +1,18 @@
 ﻿# scripts/build.ps1 — Windows 构建脚本
-# 用法：./scripts/build.ps1 [-Config Release|Debug] [-NoTests] [-NoPythonTests]
+# 用法：./scripts/build.ps1 [-Config Release|Debug] [-NoTests] [-NoPythonTests] [-Generator <名>] [-Arch <架构>]
 # 本文件为 UTF-8 with BOM：无 BOM 时 PowerShell 5.1 按系统 ANSI 代码页
 # （简中为 GBK/936）解码，中文注释与字符串会乱码，甚至直接语法报错。
 param(
     [ValidateSet("Release", "Debug")]
     [string]$Config = "Release",
     [switch]$NoTests,
-    [switch]$NoPythonTests
+    [switch]$NoPythonTests,
+    # 生成器与架构：留空 = 交 CMake 自动探测。但**探测结果随机器而变**
+    # （本机默认 Ninja + MinGW；GitHub 的 Windows 运行器默认 Visual Studio + MSVC），
+    # 要让「构建工具链」成为受控变量就得能显式钉死：
+    #   -Generator "Visual Studio 17 2022" -Arch x64
+    [string]$Generator = "",
+    [string]$Arch = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,12 +39,20 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
 
 $tests = if ($NoTests) { "OFF" } else { "ON" }
 
-# 生成器交给 CMake 自动探测（装了什么就用什么），不硬编码 -G。
+# 生成器默认交 CMake 自动探测（装了什么就用什么），只在显式指定时才传 -G/-A。
+# 为什么要有这个开关：探测结果**因机器而异**（本机是 Ninja + MinGW，而 CI 的
+# Windows 运行器会落在 Visual Studio + MSVC）。工具链是构建的输入之一——
+# 要复现就得能钉死它，否则「同一份源码两样结果」又会重演。
 # 用 $() 显式取值：避免某些 PowerShell 宿主把 "-DX=$Var" 原样传给 cmake
 # （曾导致 CMAKE_BUILD_TYPE 落盘为字面量 "$Config"）。
-cmake -S $Root -B $BuildDir `
-    "-DCMAKE_BUILD_TYPE=$($Config)" `
-    "-DSAVEINSPECTOR_BUILD_TESTS=$($tests)"
+$cmakeArgs = @(
+    "-S", $Root,
+    "-B", $BuildDir,
+    "-DCMAKE_BUILD_TYPE=$($Config)",
+    "-DSAVEINSPECTOR_BUILD_TESTS=$($tests)")
+if ($Generator) { $cmakeArgs += @("-G", $Generator) }
+if ($Arch) { $cmakeArgs += @("-A", $Arch) }
+cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 cmake --build $BuildDir --config $Config --parallel

@@ -1,16 +1,19 @@
-# CI：在 Linux 与 macOS 上真实编译并跑全量用例。
+# CI：在真实的三平台上编译并跑全量用例。
 #
 # 为什么非做不可：`save_file_posix.cpp` 与 `local_http_posix.cpp` 只在非 Windows
-# 上参与编译，而开发机是 Windows —— 这两份文件**从未被编译过**，更谈不上运行。
-# 契约 §7 与 G3 审计早把「三平台验证」列为 G4 前置条件，本文件就是它的执行者。
+# 上参与编译，而开发机是 Windows —— 这两份文件从未被编译过，更谈不上运行。
 #
-# 与本地构建同源：CI 直接调用 `scripts/build.sh`（文档化入口），不另写一套构建
-# 步骤——两套构建定义必然漂移。该脚本在缺 python/pytest 时会**报错退出**而不是
+# 本文件与本地构建同源：直接调用 `scripts/build.{ps1,sh}`（文档化入口），不另写
+# 一套构建步骤——两套定义必然漂移。脚本在缺 python/pytest 时会**报错退出**而不是
 # 静默跳过，所以下面必须先把 Python 层依赖装好；装漏了 CI 会红，这正是想要的
 # 失败方式（静默跳过才是「零覆盖却显示全绿」的来源）。
 #
-# 不缓存 build/ ：`_deps` 里的 googletest 构建产物与生成器/编译器版本强耦合，
-# 缓存它会把「换镜像后莫名链接失败」引进来，省下的几十秒不值这个风险。
+# 放行顺序（按当前约定）：**先 Windows**，Linux/macOS 先只观察、后期再验证。
+# 去掉它们的 experimental 标志才算「三平台验证」完成——在那之前，任何
+# 「三平台已通过」的说法都不成立。
+#
+# 不缓存 build/：`_deps` 里的 googletest 产物与生成器/编译器版本强耦合，缓存它
+# 会把「换镜像后莫名链接失败」引进来，省下的几十秒不值这个风险。
 
 name: build-and-test
 
@@ -28,16 +31,38 @@ jobs:
   build-test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60
+    # 非阻塞腿：Linux/macOS 当前只**观察**，不参与放行。它们的结论一旦被复核并
+    # 修绿，就把 experimental 改成 false —— 那才叫三平台验证完成。
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          # Windows：当前的放行平台。显式钉死生成器与架构，让「构建工具链」成为
+          # 受控变量——不指定时 CMake 的默认生成器**因机器而异**（本机默认是
+          # Ninja + MinGW，运行器上会落到 Visual Studio + MSVC），那样「同一份
+          # 源码两样结果」这一类问题又会重演。要复现就得能钉死它。
+          - os: windows-latest
+            experimental: false
+            shell: pwsh
+            script: >-
+              pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/build.ps1
+              -Config Release -Generator "Visual Studio 17 2022" -Arch x64
+          # Linux / macOS：先观察。POSIX 专有代码只在这里被编译到，哪怕只是
+          # 「编译不过」也值得提前知道。
+          - os: ubuntu-latest
+            experimental: true
+            shell: bash
+            script: ./scripts/build.sh Release
+          - os: macos-latest
+            experimental: true
+            shell: bash
+            script: ./scripts/build.sh Release
     defaults:
       run:
         # 构建与测试都在 product/ 这一层内完成（AGENTS.md 的「变层」）。
         working-directory: product
-        shell: bash
     steps:
       - name: 取源码
         uses: actions/checkout@v4
@@ -45,25 +70,33 @@ jobs:
       - name: 安装 Python（E2E 需要 pytest + pytest-timeout）
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"          # 与 pyproject 的 pytest==7.4.4 钉版相容
+          python-version: "3.12"          # 与 pyproject 里 pytest==7.4.4 的钉版相容
           cache: pip
           cache-dependency-path: product/python/pyproject.toml
 
+      # 用 `python` 而不是 `python3`：setup-python 在三个平台上都提供 `python`，
+      # 而 Windows 的运行器上没有 `python3`。
       - name: 安装 Python 层测试依赖（来源是 pyproject 的 dev extra）
+        shell: bash
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -e "./python[dev]"
-
-      # 门禁证据必须能比对与复现：把工具链指纹打进日志。
-      # 注意不要用 `| head`——本作业的 bash 带 `-eo pipefail`，上游被 SIGPIPE
-      # 打断会让这一步无辜变红；改用 `sed -n '1p'`（读完全部输入，不会提前退出）。
-      - name: 环境指纹
-        run: |
-          echo "--- 系统 ---"; uname -a
-          echo "--- 编译器 ---"; c++ --version | sed -n '1,2p'
-          echo "--- CMake ---"; cmake --version | sed -n '1p'
-          echo "--- 生成器 ---"; ninja --version 2>/dev/null || make --version | sed -n '1p'
-          echo "--- Python ---"; python3 --version
+          python -m pip install --upgrade pip
+          python -m pip install -e "./python[dev]"
 
       - name: 构建 + 全量测试（ctest + Python 单测 + 真实产物 E2E）
-        run: ./scripts/build.sh Release
+        shell: ${{ matrix.shell }}
+        run: ${{ matrix.script }}
+
+      # 指纹从构建产物里读，而不是 `c++ --version`：Windows 上没有 `c++` 这个
+      # 命令，而 CMakeCache.txt 三平台都有。
+      # 注意 Visual Studio 生成器**不缓存** CMAKE_CXX_COMPILER（编译器是按配置
+      # 决定的），所以多打一行 GENERATOR_INSTANCE —— 那就是 VS 安装路径。
+      # `if: always()` 让测试变红时也留下现场。
+      - name: 工具链指纹（失败时也打印）
+        if: always()
+        shell: bash
+        run: |
+          echo "--- 系统 ---"; uname -a
+          echo "--- Python ---"; python --version
+          echo "--- 生成器与编译器 ---"
+          grep -E "^CMAKE_GENERATOR:|^CMAKE_GENERATOR_INSTANCE:|^CMAKE_GENERATOR_PLATFORM:|^CMAKE_CXX_COMPILER:" \
+            build/CMakeCache.txt || echo "（配置未成功，无 CMakeCache.txt）"

@@ -131,17 +131,28 @@ Python 层需要 `pytest`；E2E 的超时保护还需要 `pytest-timeout`（两�
 E2E 依赖已构建的可执行文件；未构建时**自动 skip 而非失败**，避免在只跑
 单测的场景里产生噪声。
 
-### 7.1 三平台续验由 CI 执行
+### 7.1 三平台构建与用例由 CI 执行
 
-Windows 之外的平台不在开发机上；靠「记得去跑一次」等于没有跑。
-`.github/workflows/ci.yml` 在 `ubuntu-latest` 与 `macos-latest` 上各跑一次**同一个**
-`scripts/build.sh Release`：
+`.github/workflows/ci.yml` 在三个平台上各跑一次**同一个**构建脚本（同源：不为 CI
+另写构建步骤，两套定义必然漂移）：
 
-- 不为 CI 另写一套构建步骤——两套定义必然漂移，而漂移出来的那套不会有人维护；
-- 作业日志打印工具链指纹（`uname -a`、`c++ --version`、`cmake --version`、Python
-  版本），让「全绿」可比对、可复现；
-- POSIX 专有代码（`save_file_posix.cpp`、`local_http_posix.cpp`）**只在 CI 上**
-  得到编译与运行验证：它们在 Windows 构建里根本不参与编译；
+| 平台 | 入口 | 当前是否参与放行 |
+|------|------|------------------|
+| `windows-latest`（MSVC + VS 2022 生成器） | `scripts/build.ps1 -Config Release -Generator "Visual Studio 17 2022" -Arch x64` | ✅ 阻塞 |
+| `ubuntu-latest` | `scripts/build.sh Release` | ⏳ 只观察（`continue-on-error`） |
+| `macos-latest` | 同上 | ⏳ 只观察 |
+
+放行顺序是**先 Windows、Linux/macOS 后期再验证**：后两条腿去掉 `experimental`
+标志之后，才谈得上「三平台验证」完成。在那之前，不存在「三平台已通过」这一说法。
+
+- **为什么要显式钉生成器**：不指定时 CMake 的默认生成器**因机器而异**（开发机默认
+  Ninja + MinGW，运行器上落到 Visual Studio + MSVC）。工具链是构建输入之一，要复现
+  就得能钉死它——所以 `build.{ps1,sh}` 都提供了 `-Generator/--generator` 与
+  `-Arch/--arch`（留空仍交 CMake 自动探测，保留原行为）。
+- 作业日志打印工具链指纹（`uname -a`、Python 版本、CMakeCache 里的生成器 / VS
+  安装路径 / 编译器），让「全绿」可比对、可复现。
+- POSIX 专有代码（`save_file_posix.cpp`、`local_http_posix.cpp`）**只在
+  Linux/macOS 上**参与编译：它们在 Windows 构建里根本不存在。
 - E2E 的 DOM 级验证需要真实浏览器，所以 `_browser_candidates()` 除 `PATH` 外还按
-  macOS/Linux 的标准安装位置查找 Chrome/Chromium（macOS 的 Chrome 只以 `.app`
-  形式存在，并不在 `PATH` 上），否则该验证会在 CI 上静默 skip。
+  Windows/macOS/Linux 的标准安装位置查找 Chrome/Chromium（macOS 的 Chrome 只以
+  `.app` 形式存在，并不在 `PATH` 上），否则该验证会在 CI 上静默 skip。

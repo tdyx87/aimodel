@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/build.sh — Linux/macOS 构建脚本
-# 用法：./scripts/build.sh [Release|Debug] [--no-tests] [--no-python-tests]
+# 用法：./scripts/build.sh [Release|Debug] [--no-tests] [--no-python-tests] [--generator <名>] [--arch <架构>]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,27 +8,47 @@ BUILD_DIR="$ROOT/build"
 CONFIG="Release"
 TESTS="ON"
 PYTHON_TESTS="ON"
+GENERATOR=""
+ARCH=""
 
 # 逐个扫描参数：此前只看 "$2"，写成 `build.sh --no-tests Release` 会被静默忽略，
-# 而开关被丢掉比报错更难查。
-for arg in "$@"; do
-    case "$arg" in
-        Release|Debug)     CONFIG="$arg" ;;
-        --no-tests)        TESTS="OFF" ;;
-        --no-python-tests) PYTHON_TESTS="OFF" ;;
+# 而开关被丢掉比报错更难查。带值的开关（--generator/--arch）需要先确认还留有一个值，
+# 否则 `--generator` 写在最后会被静默当成空值。
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        Release|Debug)     CONFIG="$1"; shift ;;
+        --no-tests)        TESTS="OFF"; shift ;;
+        --no-python-tests) PYTHON_TESTS="OFF"; shift ;;
+        --generator)
+            if [[ $# -lt 2 ]]; then
+                echo "错误：--generator 需要一个值" >&2
+                exit 2
+            fi
+            GENERATOR="$2"; shift 2 ;;
+        --arch)
+            if [[ $# -lt 2 ]]; then
+                echo "错误：--arch 需要一个值" >&2
+                exit 2
+            fi
+            ARCH="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,3p' "$0"
             exit 0 ;;
         *)
-            echo "未知参数：$arg" >&2
-            echo "用法：$(basename "$0") [Release|Debug] [--no-tests] [--no-python-tests]" >&2
+            echo "未知参数：$1" >&2
+            echo "用法：$(basename "$0") [Release|Debug] [--no-tests] [--no-python-tests] [--generator <名>] [--arch <架构>]" >&2
             exit 2 ;;
     esac
 done
 
-cmake -S "$ROOT" -B "$BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE="$CONFIG" \
-    -DSAVEINSPECTOR_BUILD_TESTS="$TESTS"
+# 生成器默认交 CMake 自动探测；只在显式指定时才传 -G/-A。
+# 不用 `[[ ... ]] && ...` 形式：条件为假时该复合命令返回 1，在 set -e 下会直接退出。
+CMAKE_ARGS=(-S "$ROOT" -B "$BUILD_DIR"
+    -DCMAKE_BUILD_TYPE="$CONFIG"
+    -DSAVEINSPECTOR_BUILD_TESTS="$TESTS")
+if [[ -n "$GENERATOR" ]]; then CMAKE_ARGS+=(-G "$GENERATOR"); fi
+if [[ -n "$ARCH" ]]; then CMAKE_ARGS+=(-A "$ARCH"); fi
+cmake "${CMAKE_ARGS[@]}"
 cmake --build "$BUILD_DIR" --parallel
 
 if [[ "$TESTS" == "ON" ]]; then
