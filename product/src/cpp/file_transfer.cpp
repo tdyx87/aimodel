@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -19,7 +20,6 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #  include <direct.h>
-#  include <io.h>
 #  include <wchar.h>
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
@@ -185,7 +185,14 @@ std::FILE* OpenReadBinary(const std::string& path) {
 #if defined(_WIN32) || defined(_WIN64)
     const std::wstring w = Utf8ToWide(path);
     if (w.empty()) return NULL;
+#  if defined(_MSC_VER)
+    // MSVC：_wfopen 在 UCRT 下已弃用，/W4 会报 C4996（本项目零警告门禁）。
+    std::FILE* fp = NULL;
+    return ::_wfopen_s(&fp, w.c_str(), L"rb") == 0 ? fp : NULL;
+#  else
+    // MinGW-w64 无 _wfopen_s，退回 _wfopen（该编译器不报 C4996）。
     return ::_wfopen(w.c_str(), L"rb");
+#  endif
 #else
     return std::fopen(path.c_str(), "rb");
 #endif
@@ -225,8 +232,17 @@ int CreateFileExclusiveAndWrite(const std::string& path,
                          &written, NULL) != 0 &&
              written == content.size();
     }
+    // 落盘后刷出，语义对齐 POSIX 分支的 fsync（避免「返回成功但数据仍在页缓存」）。
+    if (ok && !content.empty() && !::FlushFileBuffers(h)) {
+        ok = false;
+    }
     ::CloseHandle(h);
-    return ok ? 0 : -1;
+    if (!ok) {
+        // 写坏的文件不留残file（与 POSIX 分支的 unlink 对齐）。
+        ::DeleteFileW(wpath.c_str());
+        return -1;
+    }
+    return 0;
 #else
     const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) {
@@ -243,7 +259,14 @@ int CreateFileExclusiveAndWrite(const std::string& path,
         off += static_cast<size_t>(n);
     }
     // fsync 后再 close，避免「返回成功但数据仍在页缓存」的断电丢数据错觉。
-    if (::fsync(fd) != 0) ok = false;
+    // 但**不能**把 fsync 失败一律判为写失败：部分文件系统（若干 FUSE / 网络挂载）
+    // 不支持 fsync 并返回 EINVAL/ENOTSUP，那会让每次上传都 WRITE_FAILED 且被删。
+    if (ok && content.size() > 0 && ::fsync(fd) != 0) {
+        const int err = errno;
+        if (err != EINVAL && err != ENOTSUP && err != EROFS && err != ENOSYS) {
+            ok = false;
+        }
+    }
     ::close(fd);
     if (!ok) {
         ::unlink(path.c_str());  // 写坏的文件不留残file
@@ -293,6 +316,37 @@ bool ContainsPathStructure(const std::string& filename) {
         if (IsPathSeparator(filename[i])) return true;
     }
     return false;
+}
+
+// 路径的「根前缀」：Windows 盘符（"C:"）或 UNC 前缀（"\\\\"）、POSIX 前导 "/"。
+// 它是路径的组成部分而非可创建的目录，必须在逐段 mkdir 之前先接上。
+//
+// 为什么必须单独处理：SplitNormalizedSegments 会丢弃前导分隔符产生的空段，
+// 于是 "/data/uploads" 的分段结果是 ["data", "uploads"]——与相对路径
+// "data/uploads" 完全同形。若据此逐段 mkdir，"/data/uploads" 会在**当前工作
+// 目录**下建出 data/uploads，落盘位置与授权目录不符（路径白名单仍会通过，
+// 因为它同样按段比较，但文件落在了意外的位置）。
+std::string RootPrefixOf(const std::string& path) {
+    if (path.empty()) {
+        return std::string();
+    }
+#if defined(_WIN32) || defined(_WIN64)
+    // 盘符形式："C:" 或 "C:/..." / "C:\..."
+    if (path.size() >= 2 && path[1] == ':' &&
+            std::isalpha(static_cast<unsigned char>(path[0]))) {
+        return path.substr(0, 2);
+    }
+    // UNC 前缀 "\\\\server\\share"：首段本身已是真实目录，交由后续 mkdir 处理，
+    // 这里只保证拼接时不丢掉前导两个反斜杠。
+    if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\') {
+        return "\\\\";
+    }
+#else
+    if (path[0] == '/') {
+        return "/";
+    }
+#endif
+    return std::string();
 }
 
 }  // namespace
@@ -394,16 +448,6 @@ std::string FileTransfer::MakeSafeFilename(const std::string& filename) {
     return safe;
 }
 
-std::string FileTransfer::GetUniqueFilename(const std::string& filename) {
-    // 唯一性主要由 AppendUpload 的排他创建（O_EXCL）保证；这里只做一次
-    // 快速预检，让常见情况（无同名文件）不必走重试循环。
-    if (!PathExists(JoinPath(uploads_root_, filename))) {
-        return filename;
-    }
-    // 已存在：直接交给调用方从 attempt=1 开始生成变体。
-    return filename;
-}
-
 // 在扩展名之前插入「时间戳 + 序号」的变体名，用于撞名重试。
 std::string FileTransfer::MakeStampVariant(const std::string& filename,
                                            int index) {
@@ -459,31 +503,37 @@ bool FileTransfer::EnsureDirectory(const std::string& path, std::string* error) 
     if (IsDirectory(path)) return true;
 
     // 逐段创建，替代 C++17 的 std::filesystem::create_directories。
-    // 注意 Windows 盘符（"F:"）：SplitNormalizedSegments 会把它切成普通段 "F"，
-    // 若从该段开始 _mkdir 会失败（"F" 不是目录）。故遇到盘符段时跳过，
-    // 从 "F:/project" 这类真实目录段开始创建。
+    //
+    // 两个平台细节必须同时照顾到：
+    //   - POSIX 前导 "/" 是路径前缀而非可创建目录，且分段时被丢弃
+    //     （"/a/b" → ["a","b"]），不补回就会在**当前工作目录**下建出 a/b；
+    //   - Windows 盘符 "C:" 因 ':' 不是路径分隔符，会原样留在首段里
+    //     （"C:/a" → ["C:","a"]），已由 RootPrefixOf 接住，不能再拼一次
+    //     （否则得到 "C:/C:" 这种非法路径）。
     const std::vector<std::string> parts = SplitNormalizedSegments(path);
-    std::string acc;
-    for (size_t i = 0; i < parts.size(); ++i) {
+    std::string acc = RootPrefixOf(path);
+    size_t start = 0;
+    if (!acc.empty() && !parts.empty() && parts[0] == acc) {
+        start = 1;  // 盘符段：它已在 acc 里，跳过不重复拼接
+    }
+    for (size_t i = start; i < parts.size(); ++i) {
         if (parts[i] == "..") {
             if (error != nullptr) *error = "上传根目录不可用。";
             return false;
         }
-        // 盘符段（单字母，如 "F"）：仅作为路径前缀保留，不 mkdir。
-        const bool is_drive =
-            parts[i].size() == 2 && parts[i][1] == ':';
-        if (i == 0) {
-            acc = parts[i];
-            if (is_drive) continue;  // 盘符本身不是可创建的目录
-        } else {
+        if (!acc.empty() && !IsPathSeparator(acc[acc.size() - 1])) {
             acc += "/";
-            acc += parts[i];
         }
+        acc += parts[i];
         if (IsDirectory(acc)) continue;
         if (!MakeSingleDirectory(acc) && !IsDirectory(acc)) {
             if (error != nullptr) *error = "创建上传目录失败。";
             return false;
         }
+    }
+    if (acc.empty() || !IsDirectory(acc)) {
+        if (error != nullptr) *error = "上传根目录不可用。";
+        return false;
     }
     return true;
 }
@@ -502,7 +552,7 @@ bool FileTransfer::AppendUpload(const std::string& filename,
 
     if (filename.empty()) {
         if (error != nullptr) *error = "文件名不能为空。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kInvalidName;
         return false;
     }
 
@@ -513,10 +563,16 @@ bool FileTransfer::AppendUpload(const std::string& filename,
         return false;
     }
 
+    if (filename.size() > kMaxUploadFilenameLength) {
+        if (error != nullptr) *error = "文件名过长。";
+        if (code != nullptr) *code = FileError::kInvalidName;
+        return false;
+    }
+
     // 危险扩展名直接拒绝，不做清洗放行（契约 6.3 第 4 条）。
     if (IsDangerousExtension(filename)) {
         if (error != nullptr) *error = "该文件类型不允许上传。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kInvalidName;
         return false;
     }
 
@@ -532,13 +588,12 @@ bool FileTransfer::AppendUpload(const std::string& filename,
     // 点文件、尾点与首尾空白同样整体拒绝：MakeSafeFilename 会把 .hidden 清洗成
     // 合法的 "hidden"，若在此之后才校验，就相当于接受了隐藏文件；Windows 落盘
     // 又会剥掉首尾空白，导致落盘名与校验名不一致。契约 6.3 第 3 条。
-    if (!filename.empty() &&
-        (filename[0] == '.' || filename[filename.size() - 1] == '.' ||
-         std::isspace(static_cast<unsigned char>(filename[0])) != 0 ||
-         std::isspace(static_cast<unsigned char>(
-             filename[filename.size() - 1])) != 0)) {
+    if (filename[0] == '.' || filename[filename.size() - 1] == '.' ||
+            std::isspace(static_cast<unsigned char>(filename[0])) != 0 ||
+            std::isspace(static_cast<unsigned char>(
+                filename[filename.size() - 1])) != 0) {
         if (error != nullptr) *error = "文件名不合法。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kInvalidName;
         return false;
     }
 
@@ -551,14 +606,7 @@ bool FileTransfer::AppendUpload(const std::string& filename,
     const std::string safe = MakeSafeFilename(filename);
     if (!IsSafeFilename(safe)) {
         if (error != nullptr) *error = "文件名不合法。";
-        if (code != nullptr) *code = FileError::kInternal;
-        return false;
-    }
-
-    const std::string base = GetUniqueFilename(safe);
-    if (base.empty()) {
-        if (error != nullptr) *error = "无法生成可用的文件名。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kInvalidName;
         return false;
     }
 
@@ -568,7 +616,7 @@ bool FileTransfer::AppendUpload(const std::string& filename,
     std::string target;
     bool wrote = false;
     for (int attempt = 0; attempt < kMaxRenames && !wrote; ++attempt) {
-        target = (attempt == 0) ? base : MakeStampVariant(base, attempt);
+        target = (attempt == 0) ? safe : MakeStampVariant(safe, attempt);
         const std::string full_path = JoinPath(uploads_root_, target);
 
         // 纵深防御：落盘前仍确认路径在白名单内。
@@ -593,7 +641,7 @@ bool FileTransfer::AppendUpload(const std::string& filename,
 
     if (!wrote) {
         if (error != nullptr) *error = "无法生成可用的文件名。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kWriteFailed;
         return false;
     }
 
@@ -677,7 +725,7 @@ bool FileTransfer::ReadUpload(const std::string& filename,
 
     if (filename.empty()) {
         if (error != nullptr) *error = "文件名不能为空。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kInvalidName;
         return false;
     }
     if (content == nullptr) {
@@ -687,7 +735,7 @@ bool FileTransfer::ReadUpload(const std::string& filename,
     }
     if (filename.size() > kMaxUploadFilenameLength) {
         if (error != nullptr) *error = "文件名过长。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kInvalidName;
         return false;
     }
 
@@ -738,7 +786,7 @@ bool FileTransfer::RemoveUpload(const std::string& filename,
 
     if (filename.empty()) {
         if (error != nullptr) *error = "文件名不能为空。";
-        if (code != nullptr) *code = FileError::kInternal;
+        if (code != nullptr) *code = FileError::kInvalidName;
         return false;
     }
 

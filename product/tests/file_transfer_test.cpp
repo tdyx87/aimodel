@@ -8,7 +8,9 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <string>
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -29,6 +31,61 @@ std::string MakeTempRoot(const char* tag) {
     std::snprintf(buf, sizeof(buf), "ft_test_%s_%ld_%u", tag,
                   static_cast<long>(now), ++counter);
     return std::string(buf);
+}
+
+// 文件是否存在。用 ifstream 而非平台 API：窄路径在 Windows 上按 ANSI 代码页
+// 解释，与 GetCwd 返回的编码一致；POSIX 上本就是字节流。
+bool TestFileExists(const std::string& path) {
+    std::ifstream in(path.c_str(), std::ios::binary);
+    return in.is_open();
+}
+
+// 当前工作目录。MSVC 上 getcwd 已弃用（/W4 报 C4996），改用 _getcwd；
+// 其余编译器（MinGW-w64 / POSIX）用 getcwd。
+std::string GetCwd() {
+    char buf[1024];
+#if defined(_MSC_VER)
+    if (::_getcwd(buf, sizeof(buf)) == NULL) {
+        return std::string();
+    }
+#else
+    if (::getcwd(buf, sizeof(buf)) == NULL) {
+        return std::string();
+    }
+#endif
+    return std::string(buf);
+}
+
+// 读环境变量。MSVC 上 getenv 已弃用（/W4 报 C4996），改用 _dupenv_s。
+std::string EnvOrEmpty(const char* name) {
+#if defined(_MSC_VER)
+    char* value = NULL;
+    size_t len = 0;
+    if (::_dupenv_s(&value, &len, name) != 0 || value == NULL) {
+        if (value != NULL) std::free(value);
+        return std::string();
+    }
+    std::string out(value);
+    std::free(value);
+    return out;
+#else
+    const char* v = std::getenv(name);
+    return (v == NULL) ? std::string() : std::string(v);
+#endif
+}
+
+// 系统临时目录（绝对路径）。构造「不在当前工作目录下」的授权根时需要它——
+// 若授权根本来就是 cwd + "/" + name，那么「根前缀丢失」与「未丢失」解析到
+// 同一个文件，反向断言就恒真、什么也证明不了。
+std::string AbsTempRoot() {
+    static const char* kVars[] = {"TMPDIR", "TEMP", "TMP"};
+    for (size_t i = 0; i < sizeof(kVars) / sizeof(kVars[0]); ++i) {
+        const std::string v = EnvOrEmpty(kVars[i]);
+        if (!v.empty()) {
+            return v;
+        }
+    }
+    return std::string();
 }
 
 }  // namespace
@@ -270,12 +327,13 @@ TEST(FileTransferTest, TrailingSpaceExtensionBypassIsRejected) {
 
 TEST(FileTransferTest, EnsureDirectoryHandlesWindowsDrivePrefix) {
     // Windows 盘符前缀（如 "F:"）会被 SplitNormalizedSegments 切成普通段，
-    // EnsureDirectory 必须跳过盘符段而非尝试 mkdir("F")——否则绝对路径的
-    // 上传根目录会创建失败（端到端实测曾报 WRITE_FAILED/创建上传目录失败）。
+    // EnsureDirectory 必须先接上它再逐段 mkdir——否则 mkdir("F") 必然失败，
+    // 绝对路径的上传根目录会创建失败（端到端实测曾报 WRITE_FAILED/创建上传目录失败）。
     // 用当前工作目录的盘符拼绝对路径，避免硬编码盘符导致跨机器不可移植。
-    char cwd[1024];
-    ASSERT_NE(::getcwd(cwd, sizeof(cwd)), static_cast<char*>(nullptr));
-    const std::string abs = std::string(cwd) + "/" + MakeTempRoot("driveprefix");
+    // （文件实际落盘位置的断言见 AbsoluteUploadRootKeepsRootPrefix。）
+    const std::string cwd = GetCwd();
+    ASSERT_FALSE(cwd.empty());
+    const std::string abs = cwd + "/" + MakeTempRoot("driveprefix");
 
     aimodel::FileTransfer ft(abs);
     std::string error;
@@ -291,12 +349,12 @@ TEST(FileTransferTest, EnsureDirectoryHandlesWindowsDrivePrefix) {
 
 TEST(FileTransferTest, IsAllowedPathAcceptsAbsoluteUploadRoot) {
     // IsAllowedPath 校验的是 JoinPath(root, name)。root 自身可以是绝对路径
-    // （含盘符），故不能把「绝对路径一律拒绝」套到 full_path 上——那会让
-    // 合法的绝对根目录下所有文件都被拒（端到端实测曾报 PATH_NOT_ALLOWED）。
+    // （含盘符 / POSIX 前导 /），故不能把「绝对路径一律拒绝」套到 full_path 上
+    // ——那会让合法的绝对根目录下所有文件都被拒（端到端实测曾报 PATH_NOT_ALLOWED）。
     // 绝对路径防护属于对用户输入名的职责，已由 ContainsPathStructure 承担。
-    char cwd[1024];
-    ASSERT_NE(::getcwd(cwd, sizeof(cwd)), static_cast<char*>(nullptr));
-    const std::string abs = std::string(cwd) + "/" + MakeTempRoot("absroot");
+    const std::string cwd = GetCwd();
+    ASSERT_FALSE(cwd.empty());
+    const std::string abs = cwd + "/" + MakeTempRoot("absroot");
 
     aimodel::FileTransfer ft(abs);
     std::string error;
@@ -306,6 +364,67 @@ TEST(FileTransferTest, IsAllowedPathAcceptsAbsoluteUploadRoot) {
     // 绝对路径形式的穿越尝试仍必须被拒。
     EXPECT_FALSE(ft.AppendUpload("../outside.txt", "x", &error, &saved));
     EXPECT_FALSE(ft.ReadUpload("..\\outside.txt", &saved, &error));
+}
+
+TEST(FileTransferTest, AbsoluteUploadRootKeepsRootPrefix) {
+    // 回归：EnsureDirectory 逐段建目录时，若把根前缀（POSIX 的前导 "/"、
+    // Windows 的盘符 "C:"）当成普通段丢掉，绝对路径会退化成当前工作目录下的
+    // 相对路径 —— 文件落在与授权目录不同的位置。
+    //
+    // 用例原先是**假阳性**：它只断言 AppendUpload/ReadUpload 返回 true，
+    // 而 IsAllowedPath 也是按段比较的（前缀两边都被丢掉），所以即使建到了错误
+    // 位置照样通过；且授权根取自 cwd + "/" + name，两种解析指向同一个文件，
+    // 反向断言恒真。这里把授权根放在系统临时目录（cwd 之外），差异才可观测。
+    const std::string cwd = GetCwd();
+    const std::string base = AbsTempRoot();
+    ASSERT_FALSE(cwd.empty());
+    ASSERT_FALSE(base.empty());
+
+    const std::string name = MakeTempRoot("rootprefix");
+    const std::string abs = base + "/" + name;
+
+    aimodel::FileTransfer ft(abs);
+    std::string error;
+    std::string saved;
+    ASSERT_TRUE(ft.AppendUpload("probe.txt", "payload", &error, &saved)) << error;
+
+    // 服务端声明的根就是那个绝对路径。
+    std::string root;
+    ASSERT_TRUE(ft.GetUploadsRoot(&root));
+    EXPECT_EQ(root, abs);
+
+    // 文件必须真的落在绝对路径下。
+    EXPECT_TRUE(TestFileExists(abs + "/probe.txt")) << error;
+
+    // 反向断言：根前缀若被丢弃，会在当前工作目录下另建一份同名相对目录。
+    // （临时目录恰在 cwd 下时两者同形，无法区分，故跳过。）
+    if (base != cwd) {
+        EXPECT_FALSE(TestFileExists(cwd + "/" + name + "/probe.txt"))
+            << "根前缀丢失：文件同时出现在当前工作目录下的相对路径 " << name;
+    }
+
+    // 清理（写在 build 目录之外，用完即删）。
+    std::remove((abs + "/probe.txt").c_str());
+#if defined(_WIN32) || defined(_WIN64)
+    ::_rmdir(abs.c_str());
+#else
+    ::rmdir(abs.c_str());
+#endif
+}
+
+TEST(FileTransferTest, NestedRelativeUploadRootIsCreatedUnderCwd) {
+    // 相对根（含多级）同样要逐段建出，且目录内容可枚举。
+    const std::string rel = "a1/b2/" + MakeTempRoot("nested");
+    aimodel::FileTransfer ft(rel);
+    std::string error;
+    std::string saved;
+
+    ASSERT_TRUE(ft.AppendUpload("deep.txt", "d", &error, &saved));
+    EXPECT_TRUE(TestFileExists(rel + "/deep.txt"));
+
+    std::string listing;
+    ASSERT_TRUE(ft.ListUploads(&listing, &error));
+    EXPECT_EQ(listing, std::string("deep.txt"));
 }
 
 TEST(FileTransferTest, GetUploadsRootRoundTrips) {

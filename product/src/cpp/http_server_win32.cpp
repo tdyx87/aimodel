@@ -61,16 +61,21 @@ bool HttpServerImpl::Listen(const std::string& host, int port, std::string* erro
     if (::bind(listen_sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
         int e = ::WSAGetLastError();
         if (error != NULL) *error = (e == WSAEADDRINUSE) ? "端口已被占用" : "绑定失败";
-        NetGlobalShutdown();
+        // 失败路径必须回收，否则每次重试泄漏一个套接字句柄。
+        // 注意这里**不**调 NetGlobalShutdown：引用计数的成对释放由
+        // LocalServer::Start 统一负责（此处再减一次会打乱跨实例的计数）。
+        ::closesocket(listen_sock);
+        listen_sock = NET_INVALID_SOCKET;
         return false;
     }
     if (::listen(listen_sock, SOMAXCONN) != 0) {
         if (error != NULL) *error = "监听失败";
-        NetGlobalShutdown();
+        ::closesocket(listen_sock);
+        listen_sock = NET_INVALID_SOCKET;
         return false;
     }
     sockaddr_in name;
-    int namelen = sizeof(addr);
+    int namelen = sizeof(name);
     if (::getsockname(listen_sock, (sockaddr*)&name, &namelen) == 0) {
         bound_port = ntohs(name.sin_port);
     }
@@ -127,9 +132,9 @@ bool HttpServerImpl::SendAll(net_socket_t s, const char* data, size_t len) {
 }
 
 void HttpServerImpl::CloseSocket(net_socket_t s) {
+    // 形参是值传递，赋值给 s 无意义；需要成对关闭时由调用方各自记账。
     if (s != NET_INVALID_SOCKET) {
         ::closesocket(s);
-        s = NET_INVALID_SOCKET;
     }
 }
 

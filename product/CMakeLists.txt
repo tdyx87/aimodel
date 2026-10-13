@@ -1,7 +1,13 @@
 # aimodel：跨平台系统信息库（C++11）
 # 规范来源：agents.md 第 3 节（构建）、第 4 节（跨平台）、第 6 节（C++11 约束）
 
-cmake_minimum_required(VERSION 3.10)
+# 最低版本按**实际用到的特性**定，而不是按习惯写 3.10：
+#   - FetchContent_MakeAvailable  → 3.14
+#   - cmake --build --parallel（scripts/build.{ps1,sh}）→ 3.12
+#   - ctest --test-dir（scripts/build.{ps1,sh}）        → 3.20
+# 写 3.10 会让 3.10~3.19 的用户在 configure 或 test 阶段直接失败，
+# 且失败信息指向 CMake 内部而不是版本声明本身。
+cmake_minimum_required(VERSION 3.20)
 
 project(aimodel
     VERSION 0.1.0
@@ -135,10 +141,24 @@ if (AIMODEL_BUILD_TESTS)
     target_link_libraries(chat_suggest_test PRIVATE aimodel GTest::gtest_main)
     target_compile_options(chat_suggest_test PRIVATE ${AIMODEL_WARN_FLAGS})
 
+    # HTTP 层单测（起真实 LocalServer + 裸 socket 客户端）：
+    # 覆盖请求闸门（Host / Origin / Content-Type）、请求体截断、
+    # 以及错误响应的状态码——这些都无法在库层单测里断言。
+    add_executable(http_server_test tests/http_server_test.cpp)
+    # Windows：aimodel 以 STATIC + ws2_32 PRIVATE 链接，PRIVATE 不传递给本目标，
+    # 测试自身直接调用套接字 API，必须显式再链一次。
+    if (WIN32)
+        target_link_libraries(http_server_test PRIVATE aimodel GTest::gtest_main ws2_32)
+    else ()
+        target_link_libraries(http_server_test PRIVATE aimodel GTest::gtest_main)
+    endif ()
+    target_compile_options(http_server_test PRIVATE ${AIMODEL_WARN_FLAGS})
+
     include(GoogleTest)
     gtest_discover_tests(system_info_test)
     gtest_discover_tests(file_transfer_test)
     gtest_discover_tests(chat_suggest_test)
+    gtest_discover_tests(http_server_test)
 endif ()
 
 # ---- 安装 ----
@@ -148,3 +168,9 @@ install(TARGETS aimodel
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# 工具与界面资源：web/ 必须与可执行文件同级（system_info_ui 按相对路径 "web" 查找），
+# 否则安装后启动只会得到「界面资源缺失」错误页。
+if (AIMODEL_BUILD_TOOLS)
+    install(TARGETS system_info_cli system_info_ui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(DIRECTORY web/ DESTINATION ${CMAKE_INSTALL_BINDIR}/web)
+endif ()

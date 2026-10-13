@@ -14,10 +14,12 @@
 
 namespace aimodel {
 
-// 传输失败的错误码（契约第 5 节）。HTTP 层据此映射 JSON 响应体的 code 字段。
+// 传输失败的错误码（契约第 5 节）。HTTP 层据此映射 JSON 响应体的 code 字段，
+// 并按错误码选择 HTTP 状态码（见 file-transfer-contract.md §4.3）。
 enum class FileError {
     kNone = 0,        // 成功
-    kPathNotAllowed,  // 路径不在授权目录内
+    kInvalidName,     // 文件名非法（空、超长、危险扩展名、点文件、清洗后仍不合法）
+    kPathNotAllowed,  // 路径不在授权目录内（名字里带路径成分）
     kNotFound,        // 文件不存在
     kTooLarge,        // 超过大小上限
     kWriteFailed,     // 写入/删除失败
@@ -94,9 +96,6 @@ private:
 
     // 生成安全文件名，去掉非法字符（保留扩展名语义）。
     std::string MakeSafeFilename(const std::string& filename);
-
-    // 生成唯一文件名，避免覆盖已有文件。
-    std::string GetUniqueFilename(const std::string& filename);
 
     // 在扩展名前插入「时间戳 + 序号」，用于排他创建撞名后的重试。
     std::string MakeStampVariant(const std::string& filename, int index);

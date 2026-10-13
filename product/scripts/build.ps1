@@ -22,6 +22,7 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     )
     $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($found) {
+        # 同一目录里也有 ctest，补进 PATH 后下面的 ctest 调用才可用。
         $env:Path = (Split-Path -Parent $found) + ";" + $env:Path
     } else {
         Write-Error "未找到 cmake。请安装 CMake 并将其加入 PATH，或安装到默认目录。"
@@ -31,7 +32,7 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
 
 $tests = if ($NoTests) { "OFF" } else { "ON" }
 
-# MSVC 环境优先；回退到已安装的生成器（如 Ninja/MinGW）
+# 生成器交给 CMake 自动探测（装了什么就用什么），不硬编码 -G。
 # 用 $() 显式取值：避免某些 PowerShell 宿主把 "-DX=$Var" 原样传给 cmake
 # （曾导致 CMAKE_BUILD_TYPE 落盘为字面量 "$Config"，ninja 规则名非法而无法构建）
 cmake -S $Root -B $BuildDir `

@@ -5,8 +5,10 @@
 #include "aimodel/system_info.h"
 
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <sstream>
 
 namespace aimodel {
@@ -223,8 +225,29 @@ std::string ToJson(const SystemInfo& info) {
 }
 
 SystemInfo GetSystemInfo() {
+    // 采集开销大：Linux/macOS 侧要 popen 拉起 lpstat / vm_stat / system_profiler
+    // （macOS 的 system_profiler 单次就要 1~3 秒），而 HTTP 层每个
+    // /api/system-info 与 /api/chat/suggest 请求都会重新采一遍。
+    // 这里做进程内短 TTL 缓存：锁内完成采集（天然串行化，避免并发重复 fork），
+    // TTL 到期才重新采集。界面的刷新是用户手动触发的，3 秒的滞后无感知。
+    static const int kCacheTtlSeconds = 3;
+    static std::mutex cache_mutex;
+    static SystemInfo cached;
+    static std::chrono::steady_clock::time_point cached_at;
+    static bool has_cached = false;
+
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    if (has_cached &&
+        (now - cached_at) < std::chrono::seconds(kCacheTtlSeconds)) {
+        return cached;
+    }
+
     SystemInfo info;
     detail::CollectSystemInfo(&info);
+    cached = info;
+    cached_at = now;
+    has_cached = true;
     return info;
 }
 

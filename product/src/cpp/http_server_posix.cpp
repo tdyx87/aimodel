@@ -50,14 +50,24 @@ bool HttpServerImpl::Listen(const std::string& host, int port, std::string* erro
     if (::bind(listen_sock, (sockaddr*)&addr, sizeof(addr)) != 0) {
         int e = errno;
         if (error != NULL) *error = (e == EADDRINUSE) ? "端口已被占用" : "绑定失败";
+        ::close(listen_sock);  // 失败路径必须回收，否则每次重试泄漏一个 fd
+        listen_sock = NET_INVALID_SOCKET;
         return false;
     }
     if (::listen(listen_sock, SOMAXCONN) != 0) {
         if (error != NULL) *error = "监听失败";
+        ::close(listen_sock);
+        listen_sock = NET_INVALID_SOCKET;
         return false;
     }
-    if (::getsockname(listen_sock, (sockaddr*)&addr, (socklen_t*)&addr) == 0) {
-        bound_port = ntohs(addr.sin_port);
+    // 端口回读：第三个参数是 socklen_t*，须指向独立的 socklen_t。
+    // 曾误写成 (socklen_t*)&addr —— 那读的是 sin_family（AF_INET = 2），
+    // 于是只填 2 字节，后面的 sin_port 全是未初始化内存，
+    // port=0（系统分配）时拿到的是随机值。
+    sockaddr_in bound;
+    socklen_t bound_len = sizeof(bound);
+    if (::getsockname(listen_sock, (sockaddr*)&bound, &bound_len) == 0) {
+        bound_port = ntohs(bound.sin_port);
     }
     return true;
 }
@@ -111,9 +121,9 @@ bool HttpServerImpl::SendAll(net_socket_t s, const char* data, size_t len) {
 }
 
 void HttpServerImpl::CloseSocket(net_socket_t s) {
+    // 形参是值传递，赋值给 s 无意义；需要成对关闭时由调用方各自记账。
     if (s != NET_INVALID_SOCKET) {
         ::close(s);
-        s = NET_INVALID_SOCKET;
     }
 }
 

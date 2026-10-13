@@ -356,6 +356,9 @@
     var MAX_BYTES = 10 * 1024 * 1024;  // 与后端契约 6.4 一致
     var UPLOAD_URL = 'api/file/upload';
     var DOWNLOAD_URL = 'api/file/download';
+    var LIST_URL = 'api/file/list';
+    var REMOVE_URL = 'api/file/remove';
+    var UPLOAD_TIMEOUT_MS = 120000;
     var SAVED_DIR_NAME = 'data/uploads';  // 仅展示目录名，不展示绝对路径
 
     var transferBody = document.getElementById('transfer-body');
@@ -365,7 +368,9 @@
         file: null,       // 当前选择的 File
         phase: 'idle',    // idle | uploading | done | error
         message: '',
-        items: []         // 已上传文件名列表（本会话内累积）
+        items: [],       // 已上传文件名列表（来自服务端，非本会话累积）
+        listMessage: '', // 列表区提示（下载/删除的结果）
+        listTone: ''     // '' | is-ok | is-bad
     };
     var busy = false;
 
@@ -392,6 +397,7 @@
     function messageForCode(code, fallback) {
         switch (code) {
             case 'TOO_LARGE':
+            case 'REQUEST_TOO_LARGE':
                 return '文件过大，请选择小于 10 MB 的文件。';
             case 'PATH_NOT_ALLOWED':
                 return '路径不合法，请选择“允许保存目录”内的文件名。';
@@ -399,9 +405,21 @@
                 return '文件不存在，可能已被移除。';
             case 'WRITE_FAILED':
                 return '保存文件失败，请检查目录是否可写入。';
+            case 'INVALID_FILENAME':
+                return '文件名或文件类型不被允许。';
+            case 'UNSUPPORTED_MEDIA_TYPE':
+                return '请求格式不正确，请重新选择文件后再试。';
+            case 'METHOD_NOT_ALLOWED':
+                return '不支持的操作。';
             default:
                 return fallback || '操作失败，请重试。';
         }
+    }
+
+    // 列表区的提示（与上传状态相互独立）。
+    function setListStatus(text, tone) {
+        state.listMessage = text || '';
+        state.listTone = tone || '';
     }
 
     // ---- 片段 ----
@@ -526,38 +544,146 @@
 
     function downloadList() {
         var box = el('div');
+        if (state.listMessage) {
+            var note = el('div', 'upload-status' + (state.listTone ? ' ' + state.listTone : ''));
+            note.appendChild(el('span', null, state.listMessage));
+            box.appendChild(note);
+        }
         if (state.items.length === 0) {
             var empty = el('div', 'state');
             var mark = el('span', 'state-icon', '📥');
             mark.setAttribute('aria-hidden', 'true');
             empty.appendChild(mark);
-            empty.appendChild(el('span', null, '本次会话还没有上传文件'));
+            empty.appendChild(el('span', null, '还没有上传文件'));
             box.appendChild(empty);
             return box;
         }
 
-        var list = el('div', 'list');
+        var list = el('div');
         state.items.forEach(function (name) {
             var row = el('div', 'download-row');
             var label = el('span', 'file-name', name);
             label.title = name;
             row.appendChild(label);
 
-            var btn = el('button', 'btn btn-quiet btn-sm');
-            btn.type = 'button';
+            var dl = el('button', 'btn btn-quiet btn-sm');
+            dl.type = 'button';
             var icon = el('span', 'btn-icon', '⬇');
             icon.setAttribute('aria-hidden', 'true');
-            btn.appendChild(icon);
-            btn.appendChild(el('span', 'btn-text', '下载'));
-            btn.addEventListener('click', function () {
-                // 直接跳转触发浏览器下载；文件名由 Content-Disposition 决定。
-                window.location.href = DOWNLOAD_URL + '?file_name=' + encodeURIComponent(name);
+            dl.appendChild(icon);
+            dl.appendChild(el('span', 'btn-text', '下载'));
+            dl.addEventListener('click', function () {
+                downloadFile(name, dl);
             });
-            row.appendChild(btn);
+            row.appendChild(dl);
+
+            var rm = el('button', 'btn btn-quiet btn-sm');
+            rm.type = 'button';
+            rm.appendChild(el('span', 'btn-text', '删除'));
+            rm.addEventListener('click', function () {
+                removeFile(name, rm);
+            });
+            row.appendChild(rm);
+
             list.appendChild(row);
         });
         box.appendChild(list);
         return box;
+    }
+
+    // 下载走 fetch + blob，**不**用 window.location.href。
+    //
+    // 为什么：服务端对失败请求返回 JSON（{ok:false,code,message}），若直接跳转，
+    // 浏览器会把这段 JSON 当正文渲染，把用户**踢出整个界面**并丢失全部状态。
+    // 只有 fetch 能先按 Content-Type 区分成功（octet-stream）与失败（json）。
+    function downloadFile(name, button) {
+        if (button) button.disabled = true;
+        setListStatus('正在下载 ' + name + '…', '');
+        render();
+
+        fetch(DOWNLOAD_URL + '?file_name=' + encodeURIComponent(name), {
+            cache: 'no-store'
+        })
+            .then(function (response) {
+                var type = response.headers.get('Content-Type') || '';
+                if (type.indexOf('application/json') >= 0 || !response.ok) {
+                    return response.json().catch(function () { return null; }).then(function (payload) {
+                        throw new Error(messageForCode(payload && payload.code));
+                    });
+                }
+                return response.blob();
+            })
+            .then(function (blob) {
+                var url = URL.createObjectURL(blob);
+                var anchor = document.createElement('a');
+                anchor.href = url;
+                anchor.download = name;  // 服务端 Content-Disposition 优先，此处为回退
+                document.body.appendChild(anchor);
+                anchor.click();
+                document.body.removeChild(anchor);
+                URL.revokeObjectURL(url);
+                setListStatus('已下载 ' + name, 'is-ok');
+                announce('下载完成：' + name);
+            })
+            .catch(function (err) {
+                setListStatus(err && err.message ? err.message : '下载失败，请重试。', 'is-bad');
+                announce('下载失败：' + state.listMessage);
+            })
+            .then(function () {
+                if (button) button.disabled = false;
+                render();
+            });
+    }
+
+    // 删除服务端上的文件：没有它，上传目录只增不减，磁盘无法回收。
+    function removeFile(name, button) {
+        if (button) button.disabled = true;
+        setListStatus('正在删除 ' + name + '…', '');
+        render();
+
+        fetch(REMOVE_URL + '?file_name=' + encodeURIComponent(name), {
+            method: 'POST',
+            cache: 'no-store'
+        })
+            .then(function (response) {
+                return response.json().catch(function () { return null; }).then(function (payload) {
+                    if (!response.ok || !payload || payload.ok !== true) {
+                        throw new Error(messageForCode(payload && payload.code));
+                    }
+                    return payload;
+                });
+            })
+            .then(function () {
+                state.items = state.items.filter(function (item) { return item !== name; });
+                setListStatus('已删除 ' + name, 'is-ok');
+                announce('已删除 ' + name);
+            })
+            .catch(function (err) {
+                setListStatus(err && err.message ? err.message : '删除失败，请重试。', 'is-bad');
+                announce('删除失败：' + state.listMessage);
+            })
+            .then(function () {
+                if (button) button.disabled = false;
+                render();
+            });
+    }
+
+    // 从服务端拉取已上传文件列表。
+    // 重启后旧文件仍在授权目录里，但此前界面只显示「本次会话」上传的文件，
+    // 历史文件再也取不回来（服务端 ListUploads 当时没有任何 HTTP 路由）。
+    function refreshList() {
+        return fetch(LIST_URL, { cache: 'no-store' })
+            .then(function (response) {
+                return response.json().catch(function () { return null; });
+            })
+            .then(function (payload) {
+                if (payload && payload.ok === true && payload.files) {
+                    state.items = payload.files.slice();
+                }
+            })
+            .catch(function () {
+                // 列表拉取失败不阻塞上传/下载，保留既有列表内容。
+            });
     }
 
     // ---- 行为 ----
@@ -582,8 +708,12 @@
         render();
         announce('正在上传 ' + file.name + '…');
 
+        var timedOut = false;
         var controller = new AbortController();
-        var timer = window.setTimeout(function () { controller.abort(); }, 30000);
+        var timer = window.setTimeout(function () {
+            timedOut = true;
+            controller.abort();
+        }, UPLOAD_TIMEOUT_MS);
 
         fetch(UPLOAD_URL + '?file_name=' + encodeURIComponent(file.name), {
             method: 'POST',
@@ -594,12 +724,12 @@
         })
             .then(function (response) {
                 return response.json().catch(function () { return null; }).then(function (payload) {
-                    return { status: response.status, payload: payload };
+                    return { ok: response.ok, payload: payload };
                 });
             })
             .then(function (result) {
                 var payload = result.payload;
-                if (!payload || payload.ok !== true) {
+                if (!result.ok || !payload || payload.ok !== true) {
                     state.phase = 'error';
                     state.message = messageForCode(payload && payload.code, payload && payload.message);
                     announce('上传失败：' + state.message);
@@ -607,17 +737,17 @@
                 }
                 state.phase = 'done';
                 state.message = '上传成功';
-                // 落盘名由后端决定（重名会加时间戳），用它更新下载列表。
-                var saved = payload.file_name;
-                if (saved && state.items.indexOf(saved) < 0) {
-                    state.items.push(saved);
-                    state.items.sort();
-                }
+                // 列表以服务端为准（落盘名由后端决定，重名会加时间戳），
+                // 故重新拉一次而不是本地追加。
                 announce('上传成功');
+                return refreshList();
             })
             .catch(function () {
                 state.phase = 'error';
-                state.message = '上传失败，请确认 aimodel 正在运行。';
+                // 超时与「服务没起来」是两回事，不能共用一句误导用户的话。
+                state.message = timedOut
+                    ? '上传超时，请检查网络后重试。'
+                    : '上传失败，请确认 aimodel 正在运行。';
                 announce(state.message);
             })
             .then(function () {
@@ -655,7 +785,9 @@
         transferBody.appendChild(downloadList());
     }
 
+    // 首次渲染：先画骨架（列表为空），再异步补齐服务端上的文件清单。
     render();
+    refreshList().then(render);
 })();
 
 /*
@@ -922,12 +1054,16 @@
             signal: controller.signal
         })
             .then(function (response) {
-                return response.json().catch(function () { return null; });
+                return response.json().catch(function () { return null; }).then(function (payload) {
+                    return { ok: response.ok, payload: payload };
+                });
             })
-            .then(function (payload) {
-                if (!payload || payload.ok !== true) {
+            .then(function (result) {
+                var payload = result.payload;
+                if (!result.ok || !payload || payload.ok !== true) {
                     state.phase = 'error';
-                    state.message = (payload && payload.error && payload.error.message) ||
+                    var err = payload && payload.error;
+                    state.message = (err && err.message) ||
                         '暂时无法给出建议，请确认 aimodel 正在运行，然后重试。';
                     announce('建议获取失败：' + state.message);
                     return;
@@ -952,6 +1088,14 @@
 
     // ---- 渲染 ----
     function render() {
+        // 输入框会被重建，必须把焦点还回去：否则每次提交 / 出错后
+        // 光标与输入法状态都会丢失，用户得重新点一次输入框。
+        var hadFocus = false;
+        var previous = chatBody.querySelector('.chat-input');
+        if (previous && document.activeElement === previous) {
+            hadFocus = true;
+        }
+
         chatBody.textContent = '';
         chatBody.appendChild(composer());
 
@@ -969,6 +1113,19 @@
         }
 
         chatBody.appendChild(privacyNote());
+
+        if (hadFocus) {
+            var field = chatBody.querySelector('.chat-input');
+            if (field) {
+                field.focus();
+                // 光标移到末尾：提交后保留原文本并便于追加新问题。
+                try {
+                    field.setSelectionRange(field.value.length, field.value.length);
+                } catch (e) {
+                    // 部分输入类型不支持 setSelectionRange，忽略即可。
+                }
+            }
+        }
     }
 
     render();

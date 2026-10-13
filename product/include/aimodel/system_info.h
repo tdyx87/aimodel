@@ -63,6 +63,10 @@ struct SystemInfo {
 /**
  * @brief 采集当前系统信息（CPU/GPU/内存/硬盘/打印机）。
  * 任何子项采集失败仅使对应字段为空/0，不抛异常。
+ *
+ * 结果带 3 秒进程内短 TTL 缓存：采集需访问注册表 / /proc / /sys，
+ * 部分平台还要拉起子进程（Linux 的 lpstat、macOS 的 system_profiler），
+ * 单次可达秒级；HTTP 层每个请求都会调用本函数，故加缓存避免重复开销。
  * @return 填充后的 SystemInfo 结构体。
  */
 AIMODEL_API SystemInfo GetSystemInfo();
