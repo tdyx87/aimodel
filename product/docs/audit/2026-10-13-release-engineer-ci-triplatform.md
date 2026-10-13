@@ -27,6 +27,7 @@
 | macOS 编译阻塞（已修） | `product/src/cpp/local_http_posix.cpp`：`MSG_NOSIGNAL` 加 `#if defined(...)` 分支；补 `#include <cerrno>` |
 | 浏览器候选（CI 需要） | `product/tests/e2e/test_user_paths.py` `_browser_candidates()`：补 macOS `.app` 与 Linux 标准路径 |
 | E2E 容器兼容 | 同文件 `_dump_dom()` 增 `--disable-dev-shm-usage` |
+| 可执行位（CI 前置） | `product/scripts/build.sh` 由 100644 → 100755（`git update-index --chmod=+x`，提交 739f211） |
 | 文档 | `product/docs/design/test-strategy.md` §7.1 |
 
 ## 4. 关键决策
@@ -40,6 +41,7 @@
 | 补 `#include <cerrno>` | 该文件用了 `errno`/`EADDRINUSE` 却没直接包含声明头，只是靠其他头间接引入——换 libc/头版本即可能断 | 依赖传递包含（可移植性靠运气） |
 | 浏览器候选补 macOS/Linux 安装路径 | macOS 上 Chrome 只以 `.app` 存在、**不在 `PATH`**；只查 `which` 会让 DOM 级验证在 CI 上静默 skip，等于丢掉首屏渲染验证 | 只查 `PATH`（CI 上 DOM 验证静默消失） |
 | 指纹步骤避免 `\| head`，改用 `sed -n` | 作业 bash 带 `-eo pipefail`：上游被 SIGPIPE 打断会让这一步无辜变红，而它与被测代码无关 | `\| head -2`（偶发无故红） |
+| CI 继续调用文档化的 `./scripts/build.sh`，而不是改成 `bash scripts/build.sh` | 让「可执行位」本身也被 CI 守着：将来模式再丢，CI 立刻报红，而不是等用户克隆后才发现仓库是坏的 | `bash scripts/build.sh`（把模式问题掩盖过去） |
 
 ## 5. 风险与阻塞
 
@@ -55,6 +57,7 @@
   macos-latest 预装 Google Chrome.app，两者都落在新的候选列表里。
 - **Python 版本**：CI 固定 3.12，与 `pyproject.toml` 里 `pytest==7.4.4` 的钉版相容；
   本地开发机是 3.13 + pytest 9.1.1，差异由 CI 覆盖。
+- **`build.sh` 缺可执行位（已修）**：它在 git 里是 100644，而文档与 CI 都用 `./scripts/build.sh` 调用。Windows 上 `./x.sh` 照样能跑（bash 直接解释），所以本地一直未暴露；Linux/macOS 上会直接 `Permission denied`，足以让两条腿在构建之前同时变红。已在提交 739f211 改为 100755，并确认全仓库再无「带 shebang 却无 x 位」的文件。
 - **未纳入 CI 的范围**：MSVC 工具链、安装包与签名（`release-engineer` 的其余检查单）。
 
 ## 6. 产出
@@ -67,6 +70,7 @@
 | 文档 | `test-strategy.md` §7.1 |
 | 本地可验证的一条腿 | Windows + MinGW：`./scripts/build.sh Release` → ctest **41/41**、pytest **41 passed**、`Build OK` |
 | YAML 校验 | 用 PyYAML 解析并通过结构断言（矩阵 = ubuntu/macos、`working-directory: product`、5 个步骤） |
+| 可执行位修复 | `git ls-files -s product/scripts/build.sh` → **100755** |
 
 ## 7. 结论
 
@@ -83,6 +87,7 @@
 |------|------|
 | 本地能复核的部分 | Windows 腿全量重跑：ctest 41/41、pytest 41/41（含真实浏览器首屏 DOM 验证）、`Build OK`、退出码 0 |
 | workflow 静态复核 | YAML 可解析；矩阵、工作目录、超时、步骤顺序符合预期 |
+| 可执行位复核 | `git ls-files -s` 确认为 100755；仓库内不再有「带 shebang 却无 x 位」的文件 |
 | 不能复核的部分 | Linux/macOS 的实际编译与运行——**按用户要求不在本地验证**（不启用 WSL/Docker），交由 CI |
 
 ## 9. 移交
