@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="color-scheme" content="dark light" />
+        <title>存档查看器 · 看懂你的存档</title>
+        <link rel="stylesheet" href="styles.css" />
+    </head>
+    <body>
+        <div class="app">
+            <header class="topbar">
+                <div class="brand">
+                    <span class="brand-mark" aria-hidden="true">⬡</span>
+                    <span>存档查看器</span>
+                </div>
+                <span class="badge-privacy">
+                    <span aria-hidden="true">🛡</span>
+                    只读取，不修改
+                </span>
+                <span class="topbar-spacer"></span>
+                <button class="btn" id="open-btn" type="button">
+                    <span class="btn-icon" aria-hidden="true">📂</span>
+                    <span class="btn-text">打开存档</span>
+                </button>
+                <span class="sr-only" id="live" role="status" aria-live="polite"></span>
+            </header>
+
+            <!-- 未选择文件：首屏空态（设计稿 slot-list.md §2） -->
+            <main id="stage" class="stage">
+                <!-- 由 app.js 渲染 -->
+            </main>
+
+            <footer class="footer">
+                <span>所有解析都在你的电脑上完成，存档文件不会离开你的设备</span>
+            </footer>
+        </div>
+        <script src="app.js"></script>
+    </body>
+</html>
