@@ -130,3 +130,18 @@ Python 层需要 `pytest`；E2E 的超时保护还需要 `pytest-timeout`（两�
 
 E2E 依赖已构建的可执行文件；未构建时**自动 skip 而非失败**，避免在只跑
 单测的场景里产生噪声。
+
+### 7.1 三平台续验由 CI 执行
+
+Windows 之外的平台不在开发机上；靠「记得去跑一次」等于没有跑。
+`.github/workflows/ci.yml` 在 `ubuntu-latest` 与 `macos-latest` 上各跑一次**同一个**
+`scripts/build.sh Release`：
+
+- 不为 CI 另写一套构建步骤——两套定义必然漂移，而漂移出来的那套不会有人维护；
+- 作业日志打印工具链指纹（`uname -a`、`c++ --version`、`cmake --version`、Python
+  版本），让「全绿」可比对、可复现；
+- POSIX 专有代码（`save_file_posix.cpp`、`local_http_posix.cpp`）**只在 CI 上**
+  得到编译与运行验证：它们在 Windows 构建里根本不参与编译；
+- E2E 的 DOM 级验证需要真实浏览器，所以 `_browser_candidates()` 除 `PATH` 外还按
+  macOS/Linux 的标准安装位置查找 Chrome/Chromium（macOS 的 Chrome 只以 `.app`
+  形式存在，并不在 `PATH` 上），否则该验证会在 CI 上静默 skip。

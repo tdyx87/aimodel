@@ -3,6 +3,7 @@
 
 #include "local_http_impl.h"
 
+#include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <mutex>
@@ -117,8 +118,17 @@ int HttpServerImpl::Recv(net_socket_t s, char* buf, int cap, int timeout_ms) {
 bool HttpServerImpl::SendAll(net_socket_t s, const char* data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        // MSG_NOSIGNAL：即便 SIGPIPE 被忽略也不让写断开连接直接返回 EPIPE 之外的错误
+        // MSG_NOSIGNAL 是 **Linux 特有**的（Darwin 没有这个宏），无条件使用会让
+        // macOS 直接**编译失败**。macOS 侧改走「进程级忽略 SIGPIPE」这条路：
+        // NetGlobalInit 已 signal(SIGPIPE, SIG_IGN)，写入已断开的连接只会返回
+        // -1/EPIPE，由下面的 n <= 0 处理，进程不会被信号杀掉。
+        // （另一种写法是给每个已接受连接设 SO_NOSIGPIPE，但进程级忽略已足够，
+        //   且不必依赖 accept 的返回值。）
+#if defined(MSG_NOSIGNAL)
         const ssize_t n = ::send(s, data + sent, len - sent, MSG_NOSIGNAL);
+#else
+        const ssize_t n = ::send(s, data + sent, len - sent, 0);
+#endif
         if (n <= 0) {
             return false;
         }

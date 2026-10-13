@@ -177,11 +177,25 @@ def _browser_candidates() -> list:
         found = shutil.which(name)
         if found:
             candidates.append(Path(found))
+    # 各平台的标准安装位置。macOS/Linux 上浏览器**不在 PATH 上**（macOS 尤其：
+    # Chrome 只以 .app 形式存在），只靠 shutil.which 会让 DOM 级验证在 CI 上
+    # 静默 skip——那等于丢掉了首屏渲染的验证。
     for raw in (
+        # Windows
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        # macOS
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        # Linux
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
     ):
         if os.path.exists(raw):
             candidates.append(Path(raw))
@@ -208,6 +222,9 @@ def _dump_dom(browser: Path, url: str, tmp_path: Path, tag: str) -> str:
         "--headless",
         "--disable-gpu",
         "--no-sandbox",
+        # CI 容器/受限环境下 /dev/shm 往往过小，Chrome 会因此不产出 DOM；
+        # 该开关在其他平台上是空操作。
+        "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
