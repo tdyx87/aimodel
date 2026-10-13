@@ -19,6 +19,10 @@ where = ["."]
 include = ["saveinspector_tools*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# 同时收集内部工具链的格式用例与用户场景 E2E（E2E 从 ../tests/e2e 取，
+# 相对本文件是上两级）。
+testpaths = ["tests", "../tests/e2e"]
 pythonpath = ["."]
 addopts = "-q"
+# E2E 需要拉起真实可执行文件，单用例可能耗时数秒
+timeout = 300

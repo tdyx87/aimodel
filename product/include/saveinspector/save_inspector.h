@@ -115,6 +115,14 @@ public:
     // 只读访问已解析结果（HTTP 层序列化用）。
     const SaveFile& save() const { return save_; }
 
+    // 清空已加载的存档。用于「打开新文件失败」的场景：调用方已切到诊断视图，
+    // 若不清空，/api/save/slots 会继续返回上一个存档的数据，造成服务端状态
+    // 与界面所见不一致。
+    void Clear() {
+        save_ = SaveFile();
+        has_data_ = false;
+    }
+
 private:
     SaveFile save_;
     bool has_data_;

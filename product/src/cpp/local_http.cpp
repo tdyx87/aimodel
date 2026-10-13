@@ -325,6 +325,19 @@ struct LocalHttpServer::Impl {
     std::atomic<bool> running;
     int bound_port;
 
+    // 已加载的存档：全部工作线程共享。
+    //
+    // **必须加锁**（security-reviewer MED-1 / CWE-362）：/api/save/open 对它做写，
+    // /api/save/slot 与 /api/save/export 对它做读。浏览器对回环默认开 6 条并发
+    // 连接，「用户快速连续打开两个存档」就会让两个 open 真正并发——此时不加锁
+    // 可能读到赋值过程中的 std::string/vector 中间状态（未定义行为，最坏崩溃）。
+    //
+    // 锁的范围是单个请求的全部处理，耗时为毫秒级解析，串行化不影响体验。
+    // 注意本锁与 mutex（连接队列用）**刻意分开**：队列锁不得跨到业务处理，
+    // 否则一个慢请求会堵住 accept 循环。
+    mutable std::mutex inspector_mutex;
+    SaveInspector inspector;
+
     Impl() : running(false), bound_port(0) {}
 
     void AcceptLoop();
@@ -332,9 +345,6 @@ struct LocalHttpServer::Impl {
     void ServeConnection(net_socket_t client);
     void Enqueue(net_socket_t client);
     void DrainQueue();
-
-    // 每个工作线程各持一份 inspector：未加锁，串行使用。
-    SaveInspector inspector;
 };
 
 namespace {
@@ -361,6 +371,10 @@ std::string HandleRoute(const std::string& method, const std::string& raw_path,
         SaveFile save;
         std::string error;
         if (!temp.OpenBytes(body, &save, &error)) {
+            // 打开失败必须**清空**本连接已加载的存档：否则界面上已切到诊断视图，
+            // 而 /api/save/slots 仍会返回上一个存档的槽位，服务端状态与界面
+            // 所见不一致（用户选错文件后会看到不相干的旧数据）。
+            inspector->Clear();
             // 「存档损坏/无法解析」是**可预期的业务结果**，不是协议错误 →
             // 200 + {ok:false,diagnostics}；传输层错误才用 4xx/5xx。
             std::ostringstream os;
@@ -377,7 +391,6 @@ std::string HandleRoute(const std::string& method, const std::string& raw_path,
         return BuildResponse(200, "OK", "application/json; charset=utf-8",
                              inspector->SaveToJson(inspector->save()));
     }
-
     // ---- /api/save/slots ----
     if (path == "/api/save/slots" && method == "GET") {
         if (!inspector->has_data()) {
@@ -415,8 +428,12 @@ std::string HandleRoute(const std::string& method, const std::string& raw_path,
             return BuildResponse(404, "Not Found", "application/json; charset=utf-8",
                                  "{\"ok\":false,\"message\":\"找不到这个槽位。\"}");
         }
+        // 契约 §4：{"ok":true,"slot":{...}}。槽位对象必须**嵌在** "slot" 下——
+        // 直接拼会得到 {"ok":true,{"slot":1,...}}，那是非法 JSON，
+        // 前端 response.json() 抛异常，槽位详情页完全打不开
+        // （该缺陷由 E2E 抓出：库层用例与 /api/save/slots 用例都覆盖不到它）。
         return BuildResponse(200, "OK", "application/json; charset=utf-8",
-                             "{\"ok\":true," + inspector->SlotToJson(slot) + "}");
+                             "{\"ok\":true,\"slot\":" + inspector->SlotToJson(slot) + "}");
     }
 
     // ---- /api/save/export ----
@@ -665,7 +682,12 @@ void LocalHttpServer::Impl::ServeConnection(net_socket_t client) {
                 body = raw.substr(body_start,
                                   (avail < content_length) ? avail : content_length);
             }
-            response = HandleRoute(method, path, body, headers, &inspector, config);
+            // MED-1：inspector 被所有工作线程共享，路由全程持锁。
+            // 锁的范围不含上面的收包与下面的发送——网络 I/O 不占锁。
+            {
+                std::lock_guard<std::mutex> guard(inspector_mutex);
+                response = HandleRoute(method, path, body, headers, &inspector, config);
+            }
         }
     }
     if (response.empty()) {
@@ -675,7 +697,6 @@ void LocalHttpServer::Impl::ServeConnection(net_socket_t client) {
     net.SendAll(client, response.data(), response.size());
     net.CloseSocket(client);
 }
-
 LocalHttpServer::LocalHttpServer() : impl_(new Impl) {}
 
 LocalHttpServer::~LocalHttpServer() {

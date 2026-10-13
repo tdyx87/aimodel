@@ -484,10 +484,11 @@
                 return response.json().catch(function () { return null; });
             })
             .then(function (payload) {
-                if (payload && payload.ok === true) {
-                    state.detail = payload;
+                if (payload && payload.ok === true && payload.slot) {
+                    // 契约 §4：槽位对象嵌在 payload.slot 下
+                    state.detail = payload.slot;
                     state.phase = 'detail';
-                    announce('已打开槽位 ' + payload.slot);
+                    announce('已打开槽位 ' + payload.slot.slot);
                 } else {
                     state.phase = 'list';
                     state.message = (payload && payload.message) || '打不开这个槽位。';
