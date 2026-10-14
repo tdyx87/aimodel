@@ -22,6 +22,8 @@ CMakeCache.txt
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
+# cmake 在配置被中断时可能把临时工程落在仓库根（如 source dir 指定有误）
+__cmake_systeminformation/
 
 # Python
 __pycache__/
