@@ -117,12 +117,16 @@ endif ()
 # ---- 测试（GTest 固定版本，agents.md §7.4）----
 if (SAVEINSPECTOR_BUILD_TESTS)
     include(FetchContent)
+    # 必须在 FetchContent_MakeAvailable 之前关闭 gtest/gmock 的安装规则：
+    # googletest 默认会 install 自己的头文件与库，那样它们会跟着我们的安装包
+    # 装进用户目录（实测：stage_probe/include/gmock/*.h 全部被装进去）。
+    # 测试框架是构建期依赖，不该出现在交付物里。
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
         GIT_TAG v1.14.0)
-    # Windows：gtest 与被测库使用同一 CRT
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 
     enable_testing()
@@ -164,4 +168,52 @@ if (SAVEINSPECTOR_BUILD_TOOLS)
     install(TARGETS save_inspector_cli save_inspector_ui
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(DIRECTORY web/ DESTINATION ${CMAKE_INSTALL_BINDIR}/web)
+endif ()
+
+# ---- 打包（CPack）----
+#
+# 由 release-engineer 维护。三平台产物格式：
+#   Windows：NSIS 安装程序 + ZIP（免安装）
+#   macOS  ：拖放式 .app（DMG 需要 hdiutil；DRAG_AND_DROP 是无需额外工具的基线）
+#   Linux  ：TGZ（tar.gz，需 `make install`）+ DEB（需 dpkg-shlibdeps）
+#
+# 关键约束：**Python 内部工具链不进安装包**（roles.md §3.11）——
+# scripts 目录不参与 install()，产物里不会出现 saveinspector_tools。
+#
+# 签名与公证：见 docs/audit/2026-10-13-release-engineer-save-inspector.md
+# 的检查单。当前版本**未签名**（缺证书），不声明为已完成。
+if (SAVEINSPECTOR_BUILD_TOOLS)
+    set(CPACK_PACKAGE_NAME "save-inspector")
+    set(CPACK_PACKAGE_VENDOR "Save Inspector Project")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_VERSION_MAJOR "${PROJECT_VERSION_MAJOR}")
+    set(CPACK_PACKAGE_VERSION_MINOR "${PROJECT_VERSION_MINOR}")
+    set(CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+        "在本地查看游戏存档，只读取，从不修改")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "存档查看器")
+    set(CPACK_PACKAGE_CONTACT "https://github.com/tdyx87/aimodel")
+    set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+    set(CPACK_PACKAGE_FILE_NAME
+        "save-inspector-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}")
+    # 构建产物与源码都不入库（roles.md §3.11）；此处只是不让 CPack 误收。
+    set(CPACK_SOURCE_GENERATOR "TGZ")
+    set(CPACK_SOURCE_PACKAGE_FILE_NAME
+        "save-inspector-${PROJECT_VERSION}-source")
+
+    if (WIN32)
+        set(CPACK_GENERATOR "NSIS;ZIP")
+    elseif (APPLE)
+        # DMG 需要 hdiutil 且要签名才不被 Gatekeeper 拦；
+        # DRAG_AND_DROP 是无需签名即可分发的基线格式。
+        set(CPACK_GENERATOR "DragNDrop;TGZ")
+        set(CPACK_DMG_VOLUME_NAME "存档查看器 ${PROJECT_VERSION}")
+    else ()
+        set(CPACK_GENERATOR "DEB;TGZ")
+        set(CPACK_DEBIAN_PACKAGE_MAINTAINER "save-inspector@example.invalid")
+        set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+        set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    endif ()
+
+    include(CPack)
 endif ()
