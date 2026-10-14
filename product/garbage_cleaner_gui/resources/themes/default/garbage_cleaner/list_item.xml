@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  结果列表的行模板。
+  用法（见 GcMainForm::FillFileList）：
+      ui::ListContainerElement* row = new ui::ListContainerElement();
+      builder.Create(L"garbage_cleaner/list_item.xml", ui::CreateControlCallback(), this, nullptr, row);
+  duilib 会把下面这个 ListContainerElement 节点的属性与子控件填进我们传入的 row，
+  因此根节点本身只是占位，不会被实例化成控件。
+-->
+<GarbageListItem>
+    <ListContainerElement height="28" class="listitem">
+        <HBox padding="2,0,2,0">
+            <Label name="item_path" width="stretch" font="system_12" normaltextcolor="darkcolor"
+                   valign="center" endellipsis="true"/>
+            <Label name="item_category" width="90" font="system_12" normaltextcolor="lightcolor"
+                   valign="center" align="right"/>
+            <Label name="item_size" width="90" font="system_12" normaltextcolor="darkcolor"
+                   valign="center" align="right"/>
+        </HBox>
+    </ListContainerElement>
+</GarbageListItem>
