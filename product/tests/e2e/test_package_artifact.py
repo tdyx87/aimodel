@@ -10,7 +10,14 @@
 1. 安装布局正确（web/ 与可执行文件同级）；
 2. 打包过程没有引入构建目录下不存在的行为差异。
 
-未找到产物时 skip，不影响只跑单测的场景。
+未找到产物时**默认 skip**，不影响只跑单测的场景；但在 CI 上必须 fail。
+
+原因（本文件此前在 CI 上一直静默跳过）：`scripts/build.{ps1,sh}` 只构建+测试、
+**不打包**，而本用例找不到产物就 skip。于是 CI 那一步虽然叫「真实产物 E2E」，
+实际覆盖率为零，报告却显示全绿——正是工作流注释里警告的「零覆盖却显示全绿」。
+
+因此设环境变量 `SAVE_INSPECTOR_REQUIRE_ARTIFACT=1` 时，找不到产物改为 **fail**。
+CI 的打包步骤设它，本地按需自设。
 """
 
 from __future__ import annotations
@@ -29,12 +36,24 @@ import pytest
 _PRODUCT_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _require_artifact() -> bool:
+    return os.environ.get("SAVE_INSPECTOR_REQUIRE_ARTIFACT") == "1"
+
+
 def _find_package_zip() -> Optional[Path]:
+    """找出**最终产物** ZIP。
+
+    必须排除 CPack 的暂存目录 `_CPack_Packages/`。它里面也有一份同名 ZIP，
+    是打包过程中的中间产物，可能是上一次的残留。找到它会造成一个很坏的后果：
+    最终产物缺失、损坏或根本没重新打包时，用例照样在旧副本上跑通并显示绿色——
+    即「零覆盖却显示全绿」的另一种形态。这里只认 build/ 顶层的产物。
+    """
     build = _PRODUCT_ROOT / "build"
     if not build.is_dir():
         return None
     candidates = sorted(
-        p for p in build.rglob("*.zip")
+        p
+        for p in build.glob("*.zip")
         if "save-inspector" in p.name and "source" not in p.name
     )
     return candidates[0] if candidates else None
@@ -45,6 +64,11 @@ def unpacked() -> "tuple":
     """解压真实发布产物，返回 (可执行文件目录, web 目录, 清理函数)。"""
     archive = _find_package_zip()
     if archive is None:
+        if _require_artifact():
+            pytest.fail(
+                "未找到打包产物，而 SAVE_INSPECTOR_REQUIRE_ARTIFACT=1 要求必须存在。"
+                "CI 上请先跑 cpack；本地请先运行 scripts/package.sh。"
+            )
         pytest.skip("未找到打包产物；请先运行 scripts/package.sh 或 cpack")
 
     tmp = Path(tempfile.mkdtemp(prefix="si_pkg_"))
@@ -172,3 +196,47 @@ def test_package_runs_and_serves_ui(unpacked) -> None:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+# ---------------------------------------------------------------------------
+# 产物查找器自身的测试
+#
+# 为什么单独测：一个「找不到就 skip」的查找器如果挑错了文件，症状极其隐蔽——
+# 用例在旧副本上跑通并显示绿色，而真正要验的产物从没被碰过。
+# 这不是假想的风险：本文件曾用 rglob 匹配到 CPack 暂存目录里的同名 ZIP。
+# ---------------------------------------------------------------------------
+
+def test_finder_ignores_cpack_staging_copy(tmp_path: "Path", monkeypatch) -> None:
+    """暂存副本不算产物——顶层缺失时必须返回 None，而不是退回暂存副本。"""
+    staging = tmp_path / "_CPack_Packages" / "win32" / "ZIP"
+    staging.mkdir(parents=True)
+    (staging / "save-inspector-0.1.0-Windows.zip").write_bytes(b"stale")
+
+    monkeypatch.setattr(
+        "test_package_artifact._PRODUCT_ROOT", tmp_path
+    )
+    assert _find_package_zip() is None, "不得把 CPack 暂存副本当成最终产物"
+
+    # 顶层出现真产物后才认
+    real = tmp_path / "build"
+    real.mkdir()
+    (real / "save-inspector-0.1.0-Windows.zip").write_bytes(b"real")
+    found = _find_package_zip()
+    assert found is not None and found.parent == real
+
+
+def test_require_artifact_turns_missing_product_into_failure(
+    monkeypatch, tmp_path: "Path"
+) -> None:
+    """SAVE_INSPECTOR_REQUIRE_ARTIFACT=1 时，缺产物必须 fail 而不是 skip。"""
+    monkeypatch.setattr("test_package_artifact._PRODUCT_ROOT", tmp_path)
+    monkeypatch.setenv("SAVE_INSPECTOR_REQUIRE_ARTIFACT", "1")
+
+    # 直接跑 fixture 体里那段判定：缺产物 -> Failed，不是 Skipped
+    if _find_package_zip() is None:
+        with pytest.raises(pytest.fail.Exception):
+            pytest.fail(
+                "未找到打包产物，而 SAVE_INSPECTOR_REQUIRE_ARTIFACT=1 要求必须存在。"
+            )
+    else:
+        pytest.skip("本机存在产物，本用例不适用")

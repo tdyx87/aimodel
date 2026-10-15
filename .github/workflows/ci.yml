@@ -45,7 +45,6 @@ jobs:
           # 源码两样结果」这一类问题又会重演。要复现就得能钉死它。
           - os: windows-latest
             experimental: false
-            shell: pwsh
             script: >-
               pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/build.ps1
               -Config Release -Generator "Visual Studio 17 2022" -Arch x64
@@ -53,11 +52,9 @@ jobs:
           # 「编译不过」也值得提前知道。
           - os: ubuntu-latest
             experimental: true
-            shell: bash
             script: ./scripts/build.sh Release
           - os: macos-latest
             experimental: true
-            shell: bash
             script: ./scripts/build.sh Release
     defaults:
       run:
@@ -82,9 +79,37 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e "./python[dev]"
 
-      - name: 构建 + 全量测试（ctest + Python 单测 + 真实产物 E2E）
-        shell: ${{ matrix.shell }}
+      # shell 固定 bash，不从 matrix 取。
+      # 两个原因：
+      #   1) step 级的 `shell:` **不在 matrix 上下文白名单里**——写成
+      #      `${{ matrix.shell }}` 会被 GitHub 静态校验拒绝
+      #      （Unrecognized named-value: 'matrix'），工作流直接加载失败。
+      #   2) Windows 运行器上 bash 是 Git Bash，本文件上方装依赖那步已经在用它，
+      #      保持一致；调用 PowerShell 脚本时用 `pwsh` 显式起进程，不依赖调用 shell。
+      # 因此 matrix 只承载「跑什么」，不承载「用什么 shell 跑」。
+      - name: 构建 + 全量测试（ctest + Python 单测）
+        shell: bash
         run: ${{ matrix.script }}
+
+      # 产物 E2E 单独跑，且**必须真的跑**。
+      #
+      # 为什么要拆出来：上面那一步里的 pytest 会调用 test_package_artifact.py，
+      # 但 build.{ps1,sh} 只构建+测试、**不打包**，所以那次调用必然 skip——
+      # 步骤名里写着「真实产物 E2E」，实际覆盖率为零，报告却显示全绿。
+      # 这正是本文件开头警告的「零覆盖却显示全绿」。这里补上真正的打包与验证。
+      #
+      # cpack 必须在 build 目录内执行：在源码根跑会留下 _CPack_Packages/
+      # 与安装包本身（曾在仓库根留下过哈希不一致的旧包）。
+      - name: 打包（供产物 E2E 使用）
+        shell: bash
+        working-directory: product/build
+        run: cpack -C Release
+
+      - name: 产物 E2E（找不到产物即失败，不允许 skip）
+        shell: bash
+        env:
+          SAVE_INSPECTOR_REQUIRE_ARTIFACT: "1"
+        run: python -m pytest tests/e2e/test_package_artifact.py -v
 
       # 指纹从构建产物里读，而不是 `c++ --version`：Windows 上没有 `c++` 这个
       # 命令，而 CMakeCache.txt 三平台都有。
