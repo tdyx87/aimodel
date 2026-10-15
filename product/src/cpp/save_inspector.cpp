@@ -33,6 +33,35 @@ const uint32_t kMaxSupportedVersion = 3;
 // 十余种变体互不兼容，三平台各自实现会导致同一存档诊断结果相反。
 const uint64_t kCrc64Poly = 0x42F0E1EBA9EA3693ULL;
 
+// CRC-64 的 256 项查表（MSB 先行）。
+//
+// 为什么必须查表：逐位实现每字节 8 次循环，实测解析 99MB 存档时，仅校验和
+// 一项就要几十秒——PRD NFR-2 要求「不长时间无响应」直接不成立。查表后每字节
+// 一次移位加一次异或，与 Python 侧已验证的等价实现同一思路。
+//
+// 查表结果与逐位实现逐位一致（单元测试断言契约向量），两者不会各算各的。
+struct Crc64Table {
+    uint64_t entries[256];
+    Crc64Table() {
+        for (int i = 0; i < 256; ++i) {
+            uint64_t crc = static_cast<uint64_t>(i) << 56;
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((crc & 0x8000000000000000ULL) != 0) {
+                    crc = (crc << 1) ^ kCrc64Poly;
+                } else {
+                    crc <<= 1;
+                }
+            }
+            entries[i] = crc;
+        }
+    }
+};
+
+const Crc64Table& Crc64() {
+    static const Crc64Table table;   // C++11 起局部静态是线程安全的
+    return table;
+}
+
 const unsigned char kFlagCompressed = 0x1u;
 const unsigned char kFlagEncrypted = 0x2u;
 
@@ -169,17 +198,11 @@ std::string SlotLabel(uint32_t index0) {
 
 uint64_t Crc64Ecma182(const std::string& bytes) {
     // MSB 先行（契约 §2.1.1：refin/refout 均为否），init=0，xorout=0。
+    const Crc64Table& table = Crc64();
     uint64_t crc = 0;
     const unsigned char* p = reinterpret_cast<const unsigned char*>(bytes.data());
     for (size_t i = 0; i < bytes.size(); ++i) {
-        crc ^= (static_cast<uint64_t>(p[i]) << 56);
-        for (int b = 0; b < 8; ++b) {
-            if ((crc & 0x8000000000000000ULL) != 0) {
-                crc = (crc << 1) ^ kCrc64Poly;
-            } else {
-                crc <<= 1;
-            }
-        }
+        crc = (crc << 8) ^ table.entries[((crc >> 56) ^ p[i]) & 0xFFu];
     }
     return crc;
 }

@@ -52,6 +52,22 @@ def test_crc64_empty_is_zero() -> None:
     assert crc64_ecma182(b"") == 0
 
 
+def test_crc64_table_matches_bitwise() -> None:
+    """查表实现必须与逐位参考实现**完全一致**。
+
+    查表是纯性能优化（逐位版生成 100MB 样本需要数十分钟）。但查表一旦写错
+    就会静默产出错误校验和——契约 §2.1.1 的向量断言只覆盖单一输入，
+    挡不住「只在某些输入上错」的表实现。因此这里对多个长度做等价性比对。
+    """
+    from saveinspector_tools.save_format import crc64_ecma182_bitwise
+
+    for payload in (b"", b"a", b"ab", b"123456789", bytes(range(256)),
+                    b"\x00" * 300, bytes(range(255, -1, -1))):
+        assert crc64_ecma182(payload) == crc64_ecma182_bitwise(payload), (
+            f"查表版与逐位版不一致，长度 {len(payload)}"
+        )
+
+
 def test_crc64_is_order_sensitive() -> None:
     assert crc64_ecma182(b"hello") != crc64_ecma182(b"olleh")
 

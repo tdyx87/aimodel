@@ -41,20 +41,60 @@ _CRC64_INIT = 0x0000000000000000
 _CRC64_XOROUT = 0x0000000000000000
 
 
+def _build_crc64_table() -> tuple:
+    """预计算 256 项 CRC 查表。
+
+    为什么必须查表：逐位实现是每字节 8 次循环，生成 100MB 样本（校验和要覆盖
+    全部字节）需要数十分钟，会让「验证大存档」这件事本身变得不可行。查表后
+    每字节一次移位加一次异或，Python 里约快一个数量级。
+
+    查表结果与逐位实现**必须完全一致**——tests 中同时保留向量断言与
+    「查表 == 逐位」的等价性断言。
+    """
+    mask = 0xFFFFFFFFFFFFFFFF
+    table = []
+    for i in range(256):
+        crc = i << 56
+        for _ in range(8):
+            if crc & 0x8000000000000000:
+                crc = ((crc << 1) ^ _CRC64_POLY) & mask
+            else:
+                crc = (crc << 1) & mask
+        table.append(crc)
+    return tuple(table)
+
+
+_CRC64_TABLE = _build_crc64_table()
+_MASK64 = 0xFFFFFFFFFFFFFFFF
+
+
 def crc64_ecma182(data: bytes) -> int:
-    """CRC-64/ECMA-182（MSB 先行）。
+    """CRC-64/ECMA-182（MSB 先行，查表实现）。
 
     参数与 C++ 实现逐位一致；契约 §2.1.1 给出强制测试向量
     crc64_ecma182(b"123456789") == 0x6C40DF5F0B497347。
+    """
+    crc = _CRC64_INIT
+    table = _CRC64_TABLE
+    for byte in data:
+        crc = ((crc << 8) & _MASK64) ^ table[((crc >> 56) ^ byte) & 0xFF]
+    return crc ^ _CRC64_XOROUT
+
+
+def crc64_ecma182_bitwise(data: bytes) -> int:
+    """同一算法的逐位参考实现。
+
+    保留它是为了让「查表版 == 逐位版」成为一条可断言的不变量——查表是纯性能
+    优化，一旦写错就会静默产出错误校验和，而向量断言只覆盖一个输入。
     """
     crc = _CRC64_INIT
     for byte in data:
         crc ^= byte << 56
         for _ in range(8):
             if crc & 0x8000000000000000:
-                crc = ((crc << 1) ^ _CRC64_POLY) & 0xFFFFFFFFFFFFFFFF
+                crc = ((crc << 1) ^ _CRC64_POLY) & _MASK64
             else:
-                crc = (crc << 1) & 0xFFFFFFFFFFFFFFFF
+                crc = (crc << 1) & _MASK64
     return crc ^ _CRC64_XOROUT
 
 
@@ -261,6 +301,44 @@ def sample_encrypted() -> bytes:
 def sample_future_version() -> bytes:
     """来自更新版本的游戏：本工具应拒绝并给出可执行建议。"""
     return build_save([Slot(level=1, coins=1)], version=4)
+
+
+def sample_large_save(
+    target_bytes: int = 100 * 1024 * 1024,
+    items_per_slot: int = 500,
+    achievements_per_slot: int = 40,
+) -> bytes:
+    """生成一个约 target_bytes 的大存档，用于验证 PRD NFR-2。
+
+    NFR-2 要求「100 MB 的存档，界面保持可响应，不崩溃、不长时间无响应」。
+    该样本与真实存档同构——只是槽位多、每槽道具多，因此解析路径完全相同，
+    不是靠灌垃圾数据撑体积。
+
+    确定性：道具 ID 由下标推导，无随机。
+    """
+    # 每槽字节数：level4 + coins8 + playtime8 + items_count4 + items*8
+    #            + ach_count4 + achs*4 + last_played8 + signature8
+    # 另加槽位表项 24 字节
+    per_slot = (
+        4 + 8 + 8 + 4 + items_per_slot * 8
+        + 4 + achievements_per_slot * 4 + 8 + 8
+        + SLOT_ENTRY_SIZE + HEADER_SIZE
+    )
+    slot_count = max(1, target_bytes // per_slot)
+
+    slots: List[Slot] = [
+        Slot(
+            level=1 + (i % 200),
+            coins=1000 * i,
+            playtime_sec=3600 * (i % 500),
+            items=[Item(1001 + (n % 100), n % 97) for n in range(items_per_slot)],
+            achievements=[1 + (n % 60) for n in range(achievements_per_slot)],
+            last_played_utc=1773500000 + i,
+            signature=0,
+        )
+        for i in range(slot_count)
+    ]
+    return build_save(slots, version=3)
 
 
 def sample_huge_array_count() -> bytes:
