@@ -43,11 +43,21 @@ jobs:
           # 受控变量——不指定时 CMake 的默认生成器**因机器而异**（本机默认是
           # Ninja + MinGW，运行器上会落到 Visual Studio + MSVC），那样「同一份
           # 源码两样结果」这一类问题又会重演。要复现就得能钉死它。
+          # 不钉死 Visual Studio 的**版本号**，只钉死「用 MSVC」。
+          # 曾经写死 "Visual Studio 17 2022"，结果 windows-latest 镜像一升级就
+          # 变成 `could not find any instance of Visual Studio`——整个 Windows 腿
+          # 从此一直红。硬钉版本号本身就是会腐烂的：运行器镜像跟着时间走，
+          # 而仓库里的字符串不会。
+          #
+          # 现在交给 CMake 选运行器上的默认生成器。看似放弃了「可复现」，
+          # 但指纹步骤会打印实际用的生成器与编译器，真出问题能对上；
+          # 而一个跑不起来的 CI 比一个生成器会漂移的 CI 糟糕得多。
+          # 需要在本地复现某个具体版本时，仍可显式传 -Generator。
           - os: windows-latest
             experimental: false
             script: >-
               pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/build.ps1
-              -Config Release -Generator "Visual Studio 17 2022" -Arch x64
+              -Config Release
           # Linux / macOS：先观察。POSIX 专有代码只在这里被编译到，哪怕只是
           # 「编译不过」也值得提前知道。
           - os: ubuntu-latest

@@ -86,7 +86,19 @@ target_compile_options(saveinspector PRIVATE ${SAVEINSPECTOR_WARN_FLAGS})
 # 静态链接 libgcc/libstdc++ 后产物自包含，不再依赖 PATH 上恰好是构建时的
 # 那一份 DLL。libwinpthread-1.dll 仍为动态（该工具链只提供 DLL，无静态库），
 # 但它是稳定的 C API，不受 C++ ABI 差异影响。
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+#
+# **必须限定在 MinGW**：这两个开关是 GCC 在 Windows 上的专有选项。
+# 无条件设置的后果（三平台各有一种，CI 全都实测到了）：
+#   - MSVC：不认识这两个选项，链接器发 warning LNK4044（无害但是噪声）
+#   - GCC/Linux：接受，不报错
+#   - Clang/macOS：**直接报错** `clang: error: unsupported option
+#     '-static-libgcc'`，配置阶段就失败。它还会传进 FetchContent 拉下来的
+#     googletest（经由 CMAKE_EXE_LINKER_FLAGS 继承），连编译器自检都过不去。
+# 本地只注意到 MSVC 的那两条 warning，且因为筛选告警时只匹配 `warning C`
+# 而漏掉了 `warning LNK4044`，所以一直没有发现——直到 CI 上 macOS 变红。
+if (MINGW)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+endif ()
 
 # ---- 工具 ----
 if (SAVEINSPECTOR_BUILD_TOOLS)

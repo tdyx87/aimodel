@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
@@ -35,15 +36,22 @@ import pytest
 
 _PRODUCT_ROOT = Path(__file__).resolve().parents[2]
 
+# CPack 在各平台产出的**二进制**包格式不同（见 CMakeLists 的 CPACK_GENERATOR）：
+#   Windows: NSIS + ZIP   → 本用例取 ZIP（NSIS 是安装器，需安装才能取文件，不适合 E2E）
+#   Linux:   DEB  + TGZ   → 取 TGZ
+#   macOS:   DragNDrop + TGZ → 取 TGZ
+# 只取二进制包，**不取 source 包**——那里面是源码，测不出产物布局。
+_PACKAGE_SUFFIXES = {".zip", ".tar.gz"}
+
 
 def _require_artifact() -> bool:
     return os.environ.get("SAVE_INSPECTOR_REQUIRE_ARTIFACT") == "1"
 
 
-def _find_package_zip() -> Optional[Path]:
-    """找出**最终产物** ZIP。
+def _find_package() -> Optional[Path]:
+    """找出**最终产物**包（跨平台）。
 
-    必须排除 CPack 的暂存目录 `_CPack_Packages/`。它里面也有一份同名 ZIP，
+    必须排除 CPack 的暂存目录 `_CPack_Packages/`。它里面也有同名包，
     是打包过程中的中间产物，可能是上一次的残留。找到它会造成一个很坏的后果：
     最终产物缺失、损坏或根本没重新打包时，用例照样在旧副本上跑通并显示绿色——
     即「零覆盖却显示全绿」的另一种形态。这里只认 build/ 顶层的产物。
@@ -53,32 +61,45 @@ def _find_package_zip() -> Optional[Path]:
         return None
     candidates = sorted(
         p
-        for p in build.glob("*.zip")
-        if "save-inspector" in p.name and "source" not in p.name
+        for p in build.iterdir()
+        if p.is_file()
+        and "save-inspector" in p.name
+        # 大小写不敏感：CPack 在 Linux/macOS 上产出的 source 包叫
+        # `...-Source.tar.gz`（大写 S），写成小写匹配会漏掉它，
+        # 于是把源码包当成二进制包解压，测出来的东西毫无意义。
+        and "source" not in p.name.lower()
+        and any(p.name.endswith(s) for s in _PACKAGE_SUFFIXES)
     )
     return candidates[0] if candidates else None
+
+
+def _extract(archive: Path, dest: Path) -> Path:
+    """解压产物，返回含 bin/ 的那一层目录。"""
+    if archive.name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(dest)
+    else:
+        with tarfile.open(archive, "r:gz") as tf:
+            tf.extractall(dest)
+    roots = [p for p in dest.iterdir() if p.is_dir()]
+    assert roots, "产物结构异常：未解压出目录"
+    return roots[0]
 
 
 @pytest.fixture(scope="session")
 def unpacked() -> "tuple":
     """解压真实发布产物，返回 (可执行文件目录, web 目录, 清理函数)。"""
-    archive = _find_package_zip()
+    archive = _find_package()
     if archive is None:
         if _require_artifact():
             pytest.fail(
                 "未找到打包产物，而 SAVE_INSPECTOR_REQUIRE_ARTIFACT=1 要求必须存在。"
-                "CI 上请先跑 cpack；本地请先运行 scripts/package.sh。"
+                f"已查找 {sorted(_PACKAGE_SUFFIXES)}；CI 上请先跑 cpack。"
             )
         pytest.skip("未找到打包产物；请先运行 scripts/package.sh 或 cpack")
 
     tmp = Path(tempfile.mkdtemp(prefix="si_pkg_"))
-    with zipfile.ZipFile(archive) as zf:
-        zf.extractall(tmp)
-
-    # 产物结构：<root>/bin/save_inspector_ui.exe + <root>/bin/web/
-    roots = [p for p in tmp.iterdir() if p.is_dir()]
-    assert roots, "产物结构异常：未解压出目录"
-    base = roots[0]
+    base = _extract(archive, tmp)
     bindir = base / "bin"
     exe = bindir / ("save_inspector_ui.exe" if os.name == "nt" else "save_inspector_ui")
     if not exe.is_file():
@@ -208,21 +229,45 @@ def test_package_runs_and_serves_ui(unpacked) -> None:
 
 def test_finder_ignores_cpack_staging_copy(tmp_path: "Path", monkeypatch) -> None:
     """暂存副本不算产物——顶层缺失时必须返回 None，而不是退回暂存副本。"""
-    staging = tmp_path / "_CPack_Packages" / "win32" / "ZIP"
+    staging = tmp_path / "build" / "_CPack_Packages" / "linux" / "TGZ"
     staging.mkdir(parents=True)
-    (staging / "save-inspector-0.1.0-Windows.zip").write_bytes(b"stale")
+    (staging / "save-inspector-0.1.0-Linux.tar.gz").write_bytes(b"stale")
 
-    monkeypatch.setattr(
-        "test_package_artifact._PRODUCT_ROOT", tmp_path
-    )
-    assert _find_package_zip() is None, "不得把 CPack 暂存副本当成最终产物"
+    monkeypatch.setattr("test_package_artifact._PRODUCT_ROOT", tmp_path)
+    assert _find_package() is None, "不得把 CPack 暂存副本当成最终产物"
 
     # 顶层出现真产物后才认
-    real = tmp_path / "build"
-    real.mkdir()
-    (real / "save-inspector-0.1.0-Windows.zip").write_bytes(b"real")
-    found = _find_package_zip()
-    assert found is not None and found.parent == real
+    real = tmp_path / "build" / "save-inspector-0.1.0-Linux.tar.gz"
+    real.write_bytes(b"real")
+    found = _find_package()
+    assert found is not None and found.parent.name == "build"
+
+
+def test_finder_accepts_each_platform_format(tmp_path: "Path", monkeypatch) -> None:
+    """各平台的产物格式都要认：Windows 产 ZIP，Linux/macOS 产 TGZ。
+
+    背景：此前只找 `*.zip`，于是 Linux 上 CPack 产出的 .tar.gz 被无视，
+    产物 E2E 在 Ubuntu 上必然失败——而同一份代码在 Windows 上正常。
+    """
+    monkeypatch.setattr("test_package_artifact._PRODUCT_ROOT", tmp_path)
+    build = tmp_path / "build"
+    build.mkdir()
+
+    # DEB 是安装包（等价于 Windows 的 NSIS），需安装才能取文件，故不取
+    (build / "save-inspector-0.1.0-Linux.deb").write_bytes(b"x")
+    assert _find_package() is None, "DEB 是安装包，不应作为可解压产物"
+
+    (build / "save-inspector-0.1.0-Linux.tar.gz").write_bytes(b"x")
+    assert _find_package() is not None
+
+
+def test_finder_rejects_source_packages(tmp_path: "Path", monkeypatch) -> None:
+    """source 包里是源码，测不出产物布局，必须排除。"""
+    monkeypatch.setattr("test_package_artifact._PRODUCT_ROOT", tmp_path)
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "save-inspector-0.1.0-Source.tar.gz").write_bytes(b"x")
+    assert _find_package() is None
 
 
 def test_require_artifact_turns_missing_product_into_failure(
@@ -232,8 +277,7 @@ def test_require_artifact_turns_missing_product_into_failure(
     monkeypatch.setattr("test_package_artifact._PRODUCT_ROOT", tmp_path)
     monkeypatch.setenv("SAVE_INSPECTOR_REQUIRE_ARTIFACT", "1")
 
-    # 直接跑 fixture 体里那段判定：缺产物 -> Failed，不是 Skipped
-    if _find_package_zip() is None:
+    if _find_package() is None:
         with pytest.raises(pytest.fail.Exception):
             pytest.fail(
                 "未找到打包产物，而 SAVE_INSPECTOR_REQUIRE_ARTIFACT=1 要求必须存在。"
