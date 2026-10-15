@@ -22,8 +22,21 @@ CMakeCache.txt
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
-# cmake 在配置被中断时可能把临时工程落在仓库根（如 source dir 指定有误）
+# cmake 中断时临时生成在 source dir 的目录
 __cmake_systeminformation/
+# CPack 工作目录与产物。
+# 注意：CPack 必须在 build 目录内执行，否则会在源码根留下 _CPack_Packages/
+# 与安装包本身——它们曾以「旧版本哈希的 ZIP」形式污染过仓库根。
+_CPack_Packages/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+install_manifest.txt
+save-inspector-*.exe
+save-inspector-*.zip
+save-inspector-*.tar.gz
+save-inspector-*.dmg
+save-inspector-*.deb
+save-inspector-*.rpm
 
 # Python
 __pycache__/
