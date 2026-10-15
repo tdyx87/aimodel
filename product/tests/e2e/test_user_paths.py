@@ -107,6 +107,11 @@ class LiveServer:
         assert status == 200, f"列出槽位 HTTP {status}"
         return json.loads(raw.decode("utf-8"))
 
+    def slot(self, index: int) -> dict:
+        status, _, raw = self.request("GET", f"/api/save/slot?index={index}")
+        assert status == 200, f"槽位详情 HTTP {status}"
+        return json.loads(raw.decode("utf-8"))
+
 
 @pytest.fixture(scope="session")
 def server() -> Iterator[LiveServer]:
@@ -293,11 +298,17 @@ def test_open_healthy_save_lists_slots(server: LiveServer) -> None:
     assert payload["ok"] is True, payload
     save = payload["save"]
     assert save["version"] == 3
-    assert len(save["slots"]) == 3
+
+    # open 只回元信息（契约 §4，2026-10-14 修订）：槽位内容另走两个端点。
+    # 断言「slots 不在 open 响应里」是有意的——防止有人为了让某个断言通过
+    # 把全量槽位塞回 open，那正是 NFR-2 不达标的主因。
+    assert "slots" not in save, "open 响应不应包含槽位内容（契约 §4）"
+    assert save["slot_count"] == 3
 
     # 进度摘要：US-2 要求槽位卡片同时显示进度与健康状态
     listing = server.slots()
     assert listing["ok"] is True
+    assert len(listing["slots"]) == 3
     first = listing["slots"][0]
     assert first["level"] == 42
     assert first["coins"] == 12480
@@ -306,8 +317,9 @@ def test_open_healthy_save_lists_slots(server: LiveServer) -> None:
     assert first["playtime"] == "128 小时"
     assert first["last_played"] != "未知"
 
-    # 道具名由核心库给出（契约 §3.2：前端不维护映射表）
-    assert save["slots"][0]["items"][0]["name"] == "治疗药水"
+    # 道具名由核心库给出（契约 §3.2：前端不维护映射表）——走单槽位详情端点
+    detail = server.slot(0)
+    assert detail["slot"]["items"][0]["name"] == "治疗药水"
 
 
 def test_slot_detail_and_export(server: LiveServer) -> None:
@@ -374,10 +386,12 @@ def test_partially_corrupted_save_keeps_readable_slots(server: LiveServer) -> No
     payload = server.open_save(SAMPLES["corrupt-checksum"]())
     assert payload["ok"] is True, "部分损坏不得导致整体拒绝"
     save = payload["save"]
+    assert save["slot_count"] == 3
 
-    assert len(save["slots"]) == 3
-    healthy = [s for s in save["slots"] if s["healthy"]]
-    corrupt = [s for s in save["slots"] if not s["healthy"]]
+    # 健康状态属槽位概要，走 /api/save/slots（契约 §4：open 不含槽位内容）
+    slots = server.slots()["slots"]
+    healthy = [s for s in slots if s["healthy"]]
+    corrupt = [s for s in slots if not s["healthy"]]
     assert len(healthy) == 2, "未损坏的槽位必须仍可读"
     assert len(corrupt) == 1
 
@@ -449,16 +463,16 @@ def test_legacy_save_is_upgraded_and_labelled(
     assert "升级" in infos[0]["title"]
     assert "没有被修改" in infos[0]["advice"]
 
-    # 缺失字段按默认值补齐，功能可用
-    assert save["slots"], "升级后槽位不应为空"
-    assert save["slots"][0]["level"] > 0
-    assert save["slots"][0]["playtime"] is not None
+    # 缺失字段按默认值补齐，功能可用（槽位内容走 /api/save/slots，契约 §4）
+    listed = server.slots()["slots"]
+    assert listed, "升级后槽位不应为空"
+    assert listed[0]["level"] > 0
 
 
 def test_empty_save_shows_empty_state_payload(server: LiveServer) -> None:
     payload = server.open_save(SAMPLES["empty"]())
     assert payload["ok"] is True
-    assert payload["save"]["slots"] == []
+    assert payload["save"]["slot_count"] == 0
     assert server.slots()["slots"] == []
 
 

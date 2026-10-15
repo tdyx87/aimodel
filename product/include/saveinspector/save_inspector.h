@@ -107,8 +107,21 @@ public:
     std::string SlotToJson(const SlotDetail& slot) const;
     std::string SlotToTextReport(const SlotDetail& slot) const;
 
-    // 整个存档的 JSON（/api/save/open 的响应体）。
+    // 整个存档的 JSON。
+    //
+    // 保留在公开 API 里：库使用者可能需要一次性拿到全量快照（离线分析、批量处理）。
+    // 但**本工具的 HTTP 层不使用它**——见 SaveMetaToJson 的说明。
     std::string SaveToJson(const SaveFile& save) const;
+
+    // 存档**元信息**的 JSON：/api/save/open 的响应体（契约 §4）。
+    //
+    // 为什么不给全量：实测 99 MB 存档时，SaveToJson 要把上千万个道具对象序列化成
+    // 约 500 MB 的 JSON，单这一项就占掉打开耗时的绝大部分，而浏览器端只用得到
+    // `version` 与 `diagnostics` 两个字段——槽位内容另有 /api/save/slots（概要）
+    // 与 /api/save/slot（单个详情）两个端点按需取。
+    //
+    // 这不是「优化了一下」，是修掉一处「响应体里绝大部分内容没有任何消费者」。
+    std::string SaveMetaToJson(const SaveFile& save) const;
 
     bool has_data() const { return has_data_; }
 

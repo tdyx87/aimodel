@@ -1,4 +1,4 @@
-// 角色：cpp-implementer
+﻿// 角色：cpp-implementer
 // 产物：tests/save_inspector_test.cpp
 // 契约：docs/design/save-format-contract.md
 //
@@ -473,4 +473,203 @@ TEST(SaveInspectorTest, FormatsDurationAndTimestamp) {
     // 1767225600，差 6274400s = 72 天 14:53:20）
     EXPECT_EQ(saveinspector::FormatTimestamp(1773500000),
               std::string("2026-03-14 14:53"));
+}
+
+// ---------------------------------------------------------------------------
+// JSON 结构校验
+//
+// 为什么需要它：早先的 JSON 断言全是 `EXPECT_NE(json.find("..."), npos)`
+// 这类**子串查找**。它挡不住结构性错误——SaveMetaToJson 曾漏掉 created 值
+// 的结束引号，所有子串断言照样全绿，41 个 C++ 测试无一失败，
+// 直到 E2E 用真正的 JSON 解析器才炸出来。
+//
+// 子串断言只能证明「某段文本出现过」，不能证明「它是一份合法 JSON」。
+// 契约 §4 的响应是给浏览器 JSON.parse 用的，所以这里必须按 JSON 的
+// 语法规则逐字符校验，而不是找关键字。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 极简 JSON 结构校验器。够用即可：验证字符串/对象/数组的闭合、逗号与冒号
+// 的位置、转义是否合法。**不**验证值的语义（数字是否是合法数字等），
+// 那些由 E2E 与前端 JSON.parse 覆盖。
+class JsonScanner {
+ public:
+    explicit JsonScanner(const std::string& text) : s_(text), i_(0) {}
+
+    bool Valid() {
+        SkipWs();
+        if (!Value()) return false;
+        SkipWs();
+        return i_ == s_.size();   // 尾随垃圾 = 非法
+    }
+
+ private:
+    const std::string& s_;
+    size_t i_;
+
+    void SkipWs() {
+        while (i_ < s_.size() &&
+               (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r')) {
+            ++i_;
+        }
+    }
+
+    bool Literal(const char* lit) {
+        const size_t n = std::strlen(lit);
+        if (s_.compare(i_, n, lit) != 0) return false;
+        i_ += n;
+        return true;
+    }
+
+    bool String() {
+        if (i_ >= s_.size() || s_[i_] != '"') return false;
+        ++i_;
+        while (i_ < s_.size()) {
+            const char c = s_[i_];
+            if (c == '"') { ++i_; return true; }
+            if (c == '\\') {
+                ++i_;
+                if (i_ >= s_.size()) return false;
+                const char esc = s_[i_];
+                if (std::strchr("\"\\/bfnrt", esc) == NULL) return false;
+                ++i_;
+                continue;
+            }
+            // 未转义的裸控制字符在 JSON 里非法
+            if (static_cast<unsigned char>(c) < 0x20) return false;
+            ++i_;
+        }
+        return false;   // 未闭合
+    }
+
+    bool Number() {
+        const size_t start = i_;
+        if (i_ < s_.size() && s_[i_] == '-') ++i_;
+        while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') ++i_;
+        if (i_ < s_.size() && s_[i_] == '.') {
+            ++i_;
+            while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') ++i_;
+        }
+        if (i_ < s_.size() && (s_[i_] == 'e' || s_[i_] == 'E')) {
+            ++i_;
+            if (i_ < s_.size() && (s_[i_] == '+' || s_[i_] == '-')) ++i_;
+            while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') ++i_;
+        }
+        return i_ > start;
+    }
+
+    bool Value() {
+        if (i_ >= s_.size()) return false;
+        switch (s_[i_]) {
+            case '"': return String();
+            case '{': return Object();
+            case '[': return Array();
+            case 't': return Literal("true");
+            case 'f': return Literal("false");
+            case 'n': return Literal("null");
+            default: return Number();
+        }
+    }
+
+    bool Object() {
+        ++i_;   // '{'
+        SkipWs();
+        if (i_ < s_.size() && s_[i_] == '}') { ++i_; return true; }
+        for (;;) {
+            SkipWs();
+            if (!String()) return false;
+            SkipWs();
+            if (i_ >= s_.size() || s_[i_] != ':') return false;
+            ++i_;
+            SkipWs();
+            if (!Value()) return false;
+            SkipWs();
+            if (i_ < s_.size() && s_[i_] == ',') { ++i_; continue; }
+            if (i_ < s_.size() && s_[i_] == '}') { ++i_; return true; }
+            return false;
+        }
+    }
+
+    bool Array() {
+        ++i_;   // '['
+        SkipWs();
+        if (i_ < s_.size() && s_[i_] == ']') { ++i_; return true; }
+        for (;;) {
+            SkipWs();
+            if (!Value()) return false;
+            SkipWs();
+            if (i_ < s_.size() && s_[i_] == ',') { ++i_; continue; }
+            if (i_ < s_.size() && s_[i_] == ']') { ++i_; return true; }
+            return false;
+        }
+    }
+};
+
+bool JsonIsWellFormed(const std::string& text) {
+    JsonScanner scanner(text);
+    return scanner.Valid();
+}
+
+saveinspector::SaveFile MakeSampleSave() {
+    saveinspector::SaveFile save;
+    save.version = saveinspector::FormatVersion::kV3;
+    save.created_utc = 1773500000;
+    saveinspector::Item item;
+    item.id = 1001;
+    item.count = 2;
+    item.name = saveinspector::ItemName(item.id);
+    saveinspector::SlotDetail slot;
+    slot.summary.index = 1;
+    slot.summary.level = 42;
+    slot.summary.coins = 12480;
+    slot.items.push_back(item);
+    save.slots.push_back(slot);
+    saveinspector::Diagnostic diag;
+    diag.severity = saveinspector::Severity::kWarning;
+    diag.title = "槽位 1 校验和不符";
+    diag.detail = "detail";
+    diag.advice = "advice";
+    save.diagnostics.push_back(diag);
+    return save;
+}
+
+}  // namespace
+
+TEST(SaveInspectorTest, JsonSerializersProduceWellFormedJson) {
+    const saveinspector::SaveFile save = MakeSampleSave();
+
+    // 契约 §4 的两个响应体都必须能被浏览器 JSON.parse 直接吃下。
+    EXPECT_TRUE(JsonIsWellFormed(saveinspector::SaveInspector().SaveToJson(save)))
+        << "SaveToJson 产出了非法 JSON";
+    EXPECT_TRUE(JsonIsWellFormed(saveinspector::SaveInspector().SaveMetaToJson(save)))
+        << "SaveMetaToJson 产出了非法 JSON";
+}
+
+TEST(SaveInspectorTest, SaveMetaJsonOmitsSlotsButKeepsMetadata) {
+    // 契约 §4（2026-10-14 修订）：open 只回元信息。槽位概要与详情
+    // 分别走 /api/save/slots 与 /api/save/slot。
+    // 若有人为了迁就某个断言把全量槽位塞回 open，正是 NFR-2 不达标的主因。
+    const saveinspector::SaveFile save = MakeSampleSave();
+    const std::string meta = saveinspector::SaveInspector().SaveMetaToJson(save);
+
+    EXPECT_NE(meta.find("\"version\":3"), std::string::npos);
+    EXPECT_NE(meta.find("\"slot_count\":1"), std::string::npos);
+    EXPECT_EQ(meta.find("\"slots\""), std::string::npos)
+        << "open 响应不应包含 slots（契约 §4）";
+    EXPECT_EQ(meta.find("\"items\""), std::string::npos)
+        << "open 响应不应包含道具明细";
+}
+
+TEST(SaveInspectorTest, MetaAndFullJsonAgreeOnDiagnostics) {
+    // 同一个存档，两种响应的 diagnostics 必须一致——否则用户会看到
+    // 「打开时说有 2 条诊断、列表里却是 3 条」这种自相矛盾。
+    const saveinspector::SaveFile save = MakeSampleSave();
+saveinspector::SaveInspector inspector;
+    const std::string meta = inspector.SaveMetaToJson(save);
+    const std::string full = inspector.SaveToJson(save);
+
+    const std::string diag_title = save.diagnostics[0].title;
+    EXPECT_NE(meta.find(diag_title), std::string::npos);
+    EXPECT_NE(full.find(diag_title), std::string::npos);
 }

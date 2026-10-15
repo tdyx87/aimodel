@@ -579,6 +579,23 @@ std::string SaveInspector::SlotToTextReport(const SlotDetail& slot) const {
     return os.str();
 }
 
+namespace {
+
+// 诊断数组的序列化。SaveToJson 与 SaveMetaToJson 共用——
+// 两者的 diagnostics 必须逐字节一致，否则同一个存档在不同响应里说法不同。
+void AppendDiagnostics(std::ostringstream& os, const SaveFile& save) {
+    for (size_t i = 0; i < save.diagnostics.size(); ++i) {
+        if (i != 0) os << ",";
+        const Diagnostic& d = save.diagnostics[i];
+        os << "{\"severity\":\"" << SeverityName(d.severity)
+           << "\",\"title\":\"" << JsonEscape(d.title)
+           << "\",\"detail\":\"" << JsonEscape(d.detail)
+           << "\",\"advice\":\"" << JsonEscape(d.advice) << "\"}";
+    }
+}
+
+}  // namespace
+
 std::string SaveInspector::SaveToJson(const SaveFile& save) const {
     std::ostringstream os;
     os << "{\"ok\":true,\"save\":{";
@@ -590,14 +607,23 @@ std::string SaveInspector::SaveToJson(const SaveFile& save) const {
         os << SlotToJson(save.slots[i]);
     }
     os << "],\"diagnostics\":[";
-    for (size_t i = 0; i < save.diagnostics.size(); ++i) {
-        if (i != 0) os << ",";
-        const Diagnostic& d = save.diagnostics[i];
-        os << "{\"severity\":\"" << SeverityName(d.severity)
-           << "\",\"title\":\"" << JsonEscape(d.title)
-           << "\",\"detail\":\"" << JsonEscape(d.detail)
-           << "\",\"advice\":\"" << JsonEscape(d.advice) << "\"}";
-    }
+    AppendDiagnostics(os, save);
+    os << "]}}";
+    return os.str();
+}
+
+std::string SaveInspector::SaveMetaToJson(const SaveFile& save) const {
+    // 只给元信息：version / created / slot_count / diagnostics。
+    //
+    // 刻意**不含** slots——槽位概要走 /api/save/slots，单个详情走 /api/save/slot。
+    // 详见 save_inspector.h 中 SaveMetaToJson 的说明（99 MB 存档实测数据）。
+    std::ostringstream os;
+    os << "{\"ok\":true,\"save\":{";
+    os << "\"version\":" << static_cast<uint32_t>(save.version)
+       << ",\"created\":\"" << JsonEscape(FormatTimestamp(save.created_utc))
+       << "\",\"slot_count\":" << save.slots.size()
+       << ",\"diagnostics\":[";
+    AppendDiagnostics(os, save);
     os << "]}}";
     return os.str();
 }

@@ -388,8 +388,10 @@ std::string HandleRoute(const std::string& method, const std::string& raw_path,
         }
         // 解析成功：把结果交给本连接的 inspector 供后续 /slot 请求使用。
         *inspector = temp;
+        // 只回元信息，不回全量槽位（契约 §4）。实测 99 MB 存档时全量序列化要
+        // 产出约 500 MB JSON，而客户端只消费 version 与 diagnostics。
         return BuildResponse(200, "OK", "application/json; charset=utf-8",
-                             inspector->SaveToJson(inspector->save()));
+                             inspector->SaveMetaToJson(inspector->save()));
     }
     // ---- /api/save/slots ----
     if (path == "/api/save/slots" && method == "GET") {

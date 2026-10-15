@@ -189,10 +189,22 @@ public:
 
 | 端点 | 方法 | 请求 | 响应 |
 |------|------|------|------|
-| `/api/save/open` | POST | `?path=<urlencoded>` 或 body 为文件字节 | `{"ok":true,"save":{...}}` 或 `{"ok":false,"diagnostics":[...]}` |
+| `/api/save/open` | POST | `?path=<urlencoded>` 或 body 为文件字节 | `{"ok":true,"save":{version,created,slot_count,diagnostics}}` 或 `{"ok":false,"diagnostics":[...]}` |
 | `/api/save/slots` | GET | — | `{"ok":true,"slots":[...]}` |
 | `/api/save/slot` | GET | `?index=<n>` | `{"ok":true,"slot":{...}}` |
 | `/api/save/export` | GET | `?index=<n>&format=json\|text` | 二进制流 + `Content-Disposition` |
+
+**`/api/save/open` 只回元信息，不回槽位内容**（2026-10-14 修订，理由见下）：
+
+- 响应中的 `save` 只含 `version` / `created` / `slot_count` / `diagnostics`；
+- 槽位概要走 `/api/save/slots`，单个槽位详情走 `/api/save/slot?index=<n>`；
+- **修订原因**：初版让 `open` 返回全量槽位。实测 99 MB 存档时，
+  这一项要序列化上千万个道具对象、产出约 **500 MB JSON**，
+  而浏览器端只消费 `version` 与 `diagnostics`——绝大部分响应体没有任何消费者。
+  这是 NFR-2（大存档不无响应）不达标的主因之一。
+- 修订方式上，`save.slots` 字段就此从端点契约中移除。
+  若日后确有「一次性导出整个存档」的需求，应另立端点（可分页 / 可流式），
+  **不得**把全量塞回 `open` 的同步响应里。
 
 **错误约定**（继承 aimodel 的教训，本次固化）：
 
