@@ -101,50 +101,65 @@ jobs:
         shell: bash
         run: ${{ matrix.script }}
 
-      # NSIS 编译器（makensis）是产出 Windows 安装器的必要条件。
-      # 运行器镜像里有 NSIS，但**不在 PATH 上**，于是 cpack 直接报
-      #   Cannot find NSIS compiler makensis
-      # 而本机装过 NSIS，所以本地打包一直正常、CI 一直红——同一个缺陷，
-      # 两边表现完全相反。这也是为什么「本机能打���」不能替代「CI 能打包」。
+      # NSIS 编译器（makensis）用于产出 Windows 安装器。**这是尽力而为，不是硬前置。**
       #
-      # 先找常见安装位置，找不到再装；两者都失败就明确报错，不静默跳过。
-      - name: 确保 NSIS 可用（产出 Windows 安装器需要 makensis）
+      # 为什么不是硬前置：产物 E2E 只解压 ZIP/TGZ，NSIS 产出的是安装器，
+      # 两者不冲突也不互相依赖。为了让 E2E 能跑而强制依赖一个外部包源，
+      # 是把依赖层级搞错了——上一次就这么写，结果 Chocolatey 源一次 504
+      # 就把整条 Windows 腿拖红。
+      #
+      # NSIS 安装器本身的验证靠本机实测（安装 / 启动 / 出结果 / 卸载 / 无残留），
+      # CI 只是**顺带**再验一遍。拿不到 NSIS 时明确告警并降级为只产出 ZIP，
+      # **不静默**：降级这件事必须出现在日志里。
+      - name: 尝试获取 NSIS（尽力而为，失败不阻断）
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          set -e
+          set -u
           found=""
           for p in "/c/Program Files (x86)/NSIS" "/c/Program Files/NSIS"; do
             if [ -f "$p/makensis.exe" ]; then found="$p"; break; fi
           done
           if [ -z "$found" ]; then
-            echo "镜像内未找到 NSIS，尝试 choco 安装"
-            choco install nsis -y --no-progress
-            for p in "/c/Program Files (x86)/NSIS" "/c/Program Files/NSIS"; do
-              if [ -f "$p/makensis.exe" ]; then found="$p"; break; fi
+            echo "镜像内无 NSIS，尝试 Chocolatey（可能因源不可用而失败）"
+            for attempt in 1 2; do
+              choco install nsis -y --no-progress || true
+              for p in "/c/Program Files (x86)/NSIS" "/c/Program Files/NSIS"; do
+                if [ -f "$p/makensis.exe" ]; then found="$p"; break; fi
+              done
+              [ -n "$found" ] && break
+              echo "第 $attempt 次获取失败"
             done
           fi
-          if [ -z "$found" ]; then
-            echo "::error::找不到 makensis，NSIS 安装器无法产出"
-            exit 1
+          if [ -n "$found" ]; then
+            echo "NSIS 路径: $found"
+            echo "$(cygpath -w "$found")" >> "$GITHUB_PATH"
+          else
+            echo "::warning title=NSIS 可能不可用::未能显式安装 NSIS，但 CPack 还会自行查注册表，最终由下面那步的降级逻辑兜底。"
           fi
-          echo "NSIS 位于: $found"
-          echo "$found" >> "$GITHUB_PATH"
-          echo "$(cygpath -w "$found")" >> "$GITHUB_PATH"
 
       # 产物 E2E 单独跑，且**必须真的跑**。
       #
-      # 为什么要拆出来：上面那一步里的 pytest 会调用 test_package_artifact.py，
-      # 但 build.{ps1,sh} 只构建+测试、**不打包**，所以那次调用必然 skip——
-      # 步骤名里写着「真实产物 E2E」，实际覆盖率为零，报告却显示全绿。
-      # 这正是本文件开头警告的「零覆盖却显示全绿」。这里补上真正的打包与验证。
+      # 有 makensis 就产出全部格式（含安装器），没有就只产出 ZIP。
       #
-      # cpack 必须在 build 目录内执行：在源码根跑会留下 _CPack_Packages/
-      # 与安装包本身（曾在仓库根留下过哈希不一致的旧包）。
+      # 判定方式刻意用「**先试完整打包，失败再降级**」，而不是用
+      # `command -v makensis` 预先判断：CPack 找 NSIS 的途径不止 PATH，
+      # 还会查 Windows 注册表。本机上 makensis 就不在 PATH 里，
+      # 但 CPack 照样打出了安装器——用 PATH 判���会误报「不可用」，
+      # 把本可产出的安装器白白降级掉。不自己复刻 CPack 的探测逻辑。
       - name: 打包（供产物 E2E 使用）
         shell: bash
         working-directory: product/build
-        run: cpack -C Release
+        run: |
+          set -e
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            if ! cpack -C Release; then
+              echo "::warning title=NSIS 不可用::完整打包失败（多为缺 makensis），降级为只产出 ZIP。NSIS 安装器的验证依据是本机实测记录。"
+              cpack -C Release -G ZIP
+            fi
+          else
+            cpack -C Release
+          fi
 
       - name: 产物 E2E（找不到产物即失败，不允许 skip）
         shell: bash
