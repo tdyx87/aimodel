@@ -101,6 +101,37 @@ jobs:
         shell: bash
         run: ${{ matrix.script }}
 
+      # NSIS 编译器（makensis）是产出 Windows 安装器的必要条件。
+      # 运行器镜像里有 NSIS，但**不在 PATH 上**，于是 cpack 直接报
+      #   Cannot find NSIS compiler makensis
+      # 而本机装过 NSIS，所以本地打包一直正常、CI 一直红——同一个缺陷，
+      # 两边表现完全相反。这也是为什么「本机能打���」不能替代「CI 能打包」。
+      #
+      # 先找常见安装位置，找不到再装；两者都失败就明确报错，不静默跳过。
+      - name: 确保 NSIS 可用（产出 Windows 安装器需要 makensis）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          found=""
+          for p in "/c/Program Files (x86)/NSIS" "/c/Program Files/NSIS"; do
+            if [ -f "$p/makensis.exe" ]; then found="$p"; break; fi
+          done
+          if [ -z "$found" ]; then
+            echo "镜像内未找到 NSIS，尝试 choco 安装"
+            choco install nsis -y --no-progress
+            for p in "/c/Program Files (x86)/NSIS" "/c/Program Files/NSIS"; do
+              if [ -f "$p/makensis.exe" ]; then found="$p"; break; fi
+            done
+          fi
+          if [ -z "$found" ]; then
+            echo "::error::找不到 makensis，NSIS 安装器无法产出"
+            exit 1
+          fi
+          echo "NSIS 位于: $found"
+          echo "$found" >> "$GITHUB_PATH"
+          echo "$(cygpath -w "$found")" >> "$GITHUB_PATH"
+
       # 产物 E2E 单独跑，且**必须真的跑**。
       #
       # 为什么要拆出来：上面那一步里的 pytest 会调用 test_package_artifact.py，
