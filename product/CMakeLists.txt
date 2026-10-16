@@ -38,6 +38,15 @@ if (WIN32)
     target_link_libraries(cagent_mem PRIVATE psapi)
 endif()
 
+# ---- buf / sse：纯逻辑，不依赖网络 ----
+# 分帧与传输刻意分开：混在一起时出了问题分不清是网络还是解析，
+# 而且「绝不整块缓冲」这条只能在纯逻辑层被可靠测到。
+add_library(cagent_buf STATIC src/buf.c)
+target_link_libraries(cagent_buf PUBLIC cagent_mem)
+
+add_library(cagent_sse STATIC src/sse.c)
+target_link_libraries(cagent_sse PUBLIC cagent_buf)
+
 # ---- 测试 ----
 if (CAGENT_BUILD_TESTS)
     include(CTest)
@@ -50,5 +59,9 @@ if (CAGENT_BUILD_TESTS)
     add_executable(mem_test tests/mem_test.c)
     target_link_libraries(mem_test PRIVATE ca_test)
 
+    add_executable(sse_test tests/sse_test.c)
+    target_link_libraries(sse_test PRIVATE ca_test cagent_sse)
+
     add_test(NAME mem_test COMMAND mem_test)
+    add_test(NAME sse_test COMMAND sse_test)
 endif()
