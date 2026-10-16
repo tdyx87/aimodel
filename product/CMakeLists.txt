@@ -51,9 +51,13 @@ target_link_libraries(cagent_sse PUBLIC cagent_buf)
 add_library(cagent_json STATIC src/json.c)
 target_link_libraries(cagent_json PUBLIC cagent_buf)
 
+# ---- tools：工具层（契约 §5，含路径安全与权限模型） ----
+add_library(cagent_tools STATIC src/tools.c)
+target_link_libraries(cagent_tools PUBLIC cagent_json)
+
 # ---- llm：服务适配（契约 §4.3） ----
 add_library(cagent_llm STATIC src/llm.c)
-target_link_libraries(cagent_llm PUBLIC cagent_json cagent_http)
+target_link_libraries(cagent_llm PUBLIC cagent_json cagent_http cagent_tools)
 
 # ---- http：传输层 ----
 # 传输做成接口（ca_transport_ops）而不是直接调 libcurl：
@@ -107,9 +111,13 @@ if (CAGENT_BUILD_TESTS)
     add_executable(llm_test tests/llm_test.c)
     target_link_libraries(llm_test PRIVATE ca_test cagent_llm)
 
+    add_executable(tools_test tests/tools_test.c)
+    target_link_libraries(tools_test PRIVATE ca_test cagent_tools)
+
     add_test(NAME mem_test COMMAND mem_test)
     add_test(NAME sse_test COMMAND sse_test)
     add_test(NAME http_test COMMAND http_test)
     add_test(NAME json_test COMMAND json_test)
     add_test(NAME llm_test COMMAND llm_test)
+    add_test(NAME tools_test COMMAND tools_test)
 endif()
