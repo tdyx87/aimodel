@@ -300,6 +300,80 @@ int ca_json_read_string(ca_json_cursor *c, char *buf, size_t cap, size_t *out_le
     return 0;
 }
 
+int ca_json_append_string(ca_json_cursor *c, char *dst, size_t cap, size_t *len) {
+    if (c == NULL || dst == NULL || len == NULL) return -3;
+    ca_json_skip_ws(c);
+    if (ca_json_peek(c) != '"') return -1;
+
+    size_t w = *len;
+    size_t p = c->pos + 1;
+    int overflow = 0;
+
+    while (p < c->len) {
+        unsigned char ch = (unsigned char)c->s[p];
+        if (ch == '"') {
+            /* 正常收尾。超限时仍返回 -2，但已写入部分保留。 */
+            if (cap > 0) dst[w < cap ? w : cap - 1] = '\0';
+            c->pos = p + 1;
+            *len = w;
+            return overflow ? -2 : 0;
+        }
+        if (ch == '\\') {
+            if (p + 1 >= c->len) return -3;
+            unsigned char esc = (unsigned char)c->s[p + 1];
+            char out_buf[4];
+            size_t out_len = 0;
+            if (esc == '"') { out_buf[0] = '"'; out_len = 1; p += 2; }
+            else if (esc == '\\') { out_buf[0] = '\\'; out_len = 1; p += 2; }
+            else if (esc == '/') { out_buf[0] = '/'; out_len = 1; p += 2; }
+            else if (esc == 'b') { out_buf[0] = '\b'; out_len = 1; p += 2; }
+            else if (esc == 'f') { out_buf[0] = '\f'; out_len = 1; p += 2; }
+            else if (esc == 'n') { out_buf[0] = '\n'; out_len = 1; p += 2; }
+            else if (esc == 'r') { out_buf[0] = '\r'; out_len = 1; p += 2; }
+            else if (esc == 't') { out_buf[0] = '\t'; out_len = 1; p += 2; }
+            else if (esc == 'u') {
+                if (p + 5 >= c->len) return -3;
+                unsigned code = 0;
+                for (int k = 0; k < 4; k++) {
+                    char h = c->s[p + 2 + k];
+                    code <<= 4;
+                    if (h >= '0' && h <= '9') code |= (unsigned)(h - '0');
+                    else if (h >= 'a' && h <= 'f') code |= (unsigned)(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') code |= (unsigned)(h - 'A' + 10);
+                    else return -3;
+                }
+                p += 6;
+                if (code < 0x80) {
+                    out_buf[0] = (char)code;
+                    out_len = 1;
+                } else if (code < 0x800) {
+                    out_buf[0] = (char)(0xC0 | (code >> 6));
+                    out_buf[1] = (char)(0x80 | (code & 0x3F));
+                    out_len = 2;
+                } else {
+                    out_buf[0] = (char)(0xE0 | (code >> 12));
+                    out_buf[1] = (char)(0x80 | ((code >> 6) & 0x3F));
+                    out_buf[2] = (char)(0x80 | (code & 0x3F));
+                    out_len = 3;
+                }
+            } else {
+                return -3;
+            }
+            for (size_t i = 0; i < out_len; i++) {
+                if (w + 1 >= cap) { overflow = 1; break; }
+                dst[w++] = out_buf[i];
+            }
+            continue;
+        }
+        /* 普通字符（含 UTF-8 多字节，逐字节透传） */
+        if (w + 1 >= cap) { overflow = 1; p++; continue; }
+        dst[w++] = (char)ch;
+        p++;
+    }
+    *len = w;
+    return -3; /* 未闭合 */
+}
+
 int ca_json_read_int(ca_json_cursor *c, long long *out) {
     if (c == NULL || out == NULL) return -2;
     ca_json_skip_ws(c);

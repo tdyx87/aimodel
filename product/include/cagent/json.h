@@ -76,6 +76,21 @@ int ca_json_index(ca_json_cursor *c, size_t index, ca_json_cursor *out);
  */
 int ca_json_read_string(ca_json_cursor *c, char *buf, size_t cap, size_t *out_len);
 
+/* 把字符串值**流式**追加到定长缓冲（不经过临时缓冲）。
+ *
+ * 为什么需要它：工具调用的 arguments 是分片到达的，单片可能远大于
+ * 一个栈上临时缓冲（一次 read_file 的参数轻易上千字节）。
+ * 若经由临时缓冲读，装不下就会被误判成"参数超限"，
+ * 从而拒绝本来合法的调用。
+ *
+ * 返回  0 成功（*len 已更新）；
+ *      -1 值不是字符串；
+ *      -2 容量不足（**不截断**：已写入的部分保留，*len 为已写长度，
+ *         调用方据此判定 overflow 并拒绝执行）；
+ *      -3 语法错误。
+ */
+int ca_json_append_string(ca_json_cursor *c, char *dst, size_t cap, size_t *len);
+
 /* 读整数值。返回 0 成功，-1 类型不符或溢出，-2 语法错误。 */
 int ca_json_read_int(ca_json_cursor *c, long long *out);
 

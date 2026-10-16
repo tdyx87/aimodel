@@ -51,6 +51,10 @@ target_link_libraries(cagent_sse PUBLIC cagent_buf)
 add_library(cagent_json STATIC src/json.c)
 target_link_libraries(cagent_json PUBLIC cagent_buf)
 
+# ---- llm：服务适配（契约 §4.3） ----
+add_library(cagent_llm STATIC src/llm.c)
+target_link_libraries(cagent_llm PUBLIC cagent_json cagent_http)
+
 # ---- http：传输层 ----
 # 传输做成接口（ca_transport_ops）而不是直接调 libcurl：
 #   1. 契约 C1 要求「只有流式回调」，做成接口等于结构上强制；
@@ -77,7 +81,7 @@ endif()
 # 空闲内存探针：NFR-1 承诺的是常驻占用，而单元测试跑完就退出，
 # 测不出那个数字。探针初始化各层后静默待命，供独立脚本采样。
 add_executable(mem_probe tools/mem_probe.c)
-target_link_libraries(mem_probe PRIVATE cagent_http)
+target_link_libraries(mem_probe PRIVATE cagent_llm)
 
 # ---- 测试 ----
 if (CAGENT_BUILD_TESTS)
@@ -100,8 +104,12 @@ if (CAGENT_BUILD_TESTS)
     add_executable(json_test tests/json_test.c)
     target_link_libraries(json_test PRIVATE ca_test cagent_json)
 
+    add_executable(llm_test tests/llm_test.c)
+    target_link_libraries(llm_test PRIVATE ca_test cagent_llm)
+
     add_test(NAME mem_test COMMAND mem_test)
     add_test(NAME sse_test COMMAND sse_test)
     add_test(NAME http_test COMMAND http_test)
     add_test(NAME json_test COMMAND json_test)
+    add_test(NAME llm_test COMMAND llm_test)
 endif()

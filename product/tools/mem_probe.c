@@ -18,6 +18,8 @@
 
 #include "cagent/buf.h"
 #include "cagent/http.h"
+#include "cagent/json.h"
+#include "cagent/llm.h"
 #include "cagent/mem.h"
 #include "cagent/sse.h"
 #include "cagent/transport_mem.h"
@@ -57,6 +59,9 @@ int main(int argc, char **argv) {
     ca_buf_init(&b, 65536);
     ca_sse s;
     ca_sse_init(&s, 0);
+    /* llm 层持有 8 个 32 KB 的工具调用槽位（共 256 KB 定长），
+     * 必须计入基线——它是常驻开销，不是按需分配。 */
+    ca_llm *llm = ca_llm_create();
     (void)ca_transport_mem();
 
     int64_t rss_init = ca_rss_bytes();
@@ -75,6 +80,7 @@ int main(int argc, char **argv) {
 
     ca_sse_free(&s);
     ca_buf_free(&b);
+    ca_llm_free(llm);
     if (ops != NULL && ops->cleanup != NULL) ops->cleanup();
     return 0;
 }
