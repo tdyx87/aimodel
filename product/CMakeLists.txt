@@ -47,6 +47,10 @@ target_link_libraries(cagent_buf PUBLIC cagent_mem)
 add_library(cagent_sse STATIC src/sse.c)
 target_link_libraries(cagent_sse PUBLIC cagent_buf)
 
+# ---- json：零分配游标扫描器（契约 C6，不引第三方） ----
+add_library(cagent_json STATIC src/json.c)
+target_link_libraries(cagent_json PUBLIC cagent_buf)
+
 # ---- http：传输层 ----
 # 传输做成接口（ca_transport_ops）而不是直接调 libcurl：
 #   1. 契约 C1 要求「只有流式回调」，做成接口等于结构上强制；
@@ -93,7 +97,11 @@ if (CAGENT_BUILD_TESTS)
     add_executable(http_test tests/http_test.c)
     target_link_libraries(http_test PRIVATE ca_test cagent_http)
 
+    add_executable(json_test tests/json_test.c)
+    target_link_libraries(json_test PRIVATE ca_test cagent_json)
+
     add_test(NAME mem_test COMMAND mem_test)
     add_test(NAME sse_test COMMAND sse_test)
     add_test(NAME http_test COMMAND http_test)
+    add_test(NAME json_test COMMAND json_test)
 endif()

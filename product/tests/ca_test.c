@@ -22,6 +22,7 @@ void ca_test_fail(const char *file, int line, const char *expr) {
     }
     g_failures++;
     printf("    %s:%d\n      断言失败: %s\n", file, line, expr);
+    fflush(stdout); /* 崩溃后仍要能看到已发生的失败 */
 }
 
 void ca_test_note_int(const char *fmt, long long a, long long b) {
@@ -33,15 +34,20 @@ void ca_test_note_int(const char *fmt, long long a, long long b) {
 void ca_test_begin(const char *name) {
     g_current = name;
     printf("[ RUN ] %s\n", name);
+    /* 崩溃时缓冲区内容会全部丢失，于是「崩溃」表现为「什么都没打印」——
+     * 那样连崩在哪个用例都看不出来。每次打印后立刻 flush。 */
+    fflush(stdout);
 }
 
 void ca_test_end(void) {
     if (g_failures == 0) {
         printf("[  ok ] %s\n", g_current);
     }
+    fflush(stdout);
 }
 
 int ca_test_summary(void) {
     printf("\n%d 次检查，%d 次失败\n", g_checks, g_failures);
+    fflush(stdout);
     return g_failures == 0 ? 0 : 1;
 }
