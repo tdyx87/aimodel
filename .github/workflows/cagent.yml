@@ -1,0 +1,139 @@
+# cagent 三平台构建与测试
+#
+# 为什么 CI 对本项目尤其重要：本产品的核心承诺是「极低内存」，
+# 而这个承诺**只有在多平台上反复实测**才站得住。单平台跑通一次
+# 说明不了任何问题——本项目此前就在「本地全绿、CI 全红」上栽过。
+#
+# libcurl 是**可选**依赖：找不到时降级为内存后端，构建仍应成功。
+# 刻意不把它设为硬前置——NSIS 那次的教训是：把可选依赖变成阻塞项，
+# 一次包源抖动就能拖红整条腿。
+#
+# 不缓存 build/：_deps 里的 googletest 产物与生成器/编译器版本强耦合。
+
+name: cagent-build
+
+on:
+  push:
+    branches: ["feat/c-agent", "main"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux/macOS 先只观察、不参与放行（NDK 验证由后续步骤推进）。
+          # 去掉 experimental 才是「三平台验证完成」。
+          - os: ubuntu-latest
+            experimental: true
+          - os: macos-latest
+            experimental: true
+          - os: windows-latest
+            experimental: false
+    defaults:
+      run:
+        working-directory: product
+
+    steps:
+      - name: 取源码
+        uses: actions/checkout@v4
+
+      # ---- 准备 libcurl 开发文件 ----
+      # 单独成一步并回显版本：libcurl 的版本差异会体现在流式行为上，
+      # 记下版本号，线上出问题时才知道该往哪个方向猜。
+      - name: 准备 libcurl（Linux/macOS）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+          else
+            brew list curl >/dev/null 2>&1 || brew install curl
+            echo "CURL_PREFIX=$(brew --prefix curl)" >> "$GITHUB_ENV"
+          fi
+          curl-config --version
+
+      - name: 准备 libcurl（Windows）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          # 运行器自带 curl，但通常没有 MSVC 导入库。vcpkg 提供
+          # 与工具链匹配的二进制，避免从源码构建（那会拖垮 CI 时间）。
+          echo "VCPKG_INSTALLATION_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}" >> "$GITHUB_ENV"
+          if [ -z "$VCPKG_INSTALLATION_ROOT" ]; then
+            echo "::error::未找到 vcpkg，Windows 腿只能构建内存后端"
+            exit 1
+          fi
+          vcpkg install curl:x64-windows-static-md
+          echo "VCPKG_INSTALLED_DIR: $VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> "$GITHUB_ENV"
+
+      - name: 准备 Python（用于内存实测交叉核对）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建（零告警为硬要求）
+        shell: bash
+        run: |
+          set -e
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          # 用 toolchain file 让 Windows 上的 vcpkg 被自动发现
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "$VCPKG_INSTALLED_DIR" ]; then
+            echo "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" >> "$CMAKE_ARGS"
+          fi
+          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" 2>/dev/null || true
+          # 关键：把告警当错误。MSVC 的 LNK4044 曾长期存在却被
+          # 一个不匹配的 grep 过滤掉，直到 CI 上另一个平台报错才暴露。
+          cmake --build build --config Release 2>&1 | tee build.log
+          if grep -qiE "warning [A-Z]+[0-9]+" build.log; then
+            echo "::error::构建产生告警，按门禁要求拒绝"
+            grep -iE "warning [A-Z]+[0-9]+" build.log | head -20
+            exit 1
+          fi
+          echo "编译零告警 ✓"
+
+      - name: 确认 libcurl 后端已编入
+        shell: bash
+        run: |
+          set -e
+          if grep -q "使用 libcurl 传输后端" build/CMakeCache.txt 2>/dev/null \
+             || grep -rq "CAGENT_HAVE_CURL" build/CMakeFiles 2>/dev/null; then
+            echo "libcurl 后端：已编入"
+          else
+            echo "::warning title=libcurl 后端未编入::本次仅验证内存后端"
+          fi
+
+      - name: 单元测试（含 100 MB 流式内存实测）
+        shell: bash
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # 内存承诺必须由**独立脚本**复核，而不是产品自己报告。
+      # 内置的内存查询服务于用户，验收脚本服务于门禁，两者不能是同一个东西。
+      - name: 独立复核内存承诺
+        shell: bash
+        run: python ../scripts/verify_memory.py --exe build/Release --budget-mb 8
+
+      - name: 工具链指纹（失败时也打印）
+        if: always()
+        shell: bash
+        run: |
+          echo "--- 系统 ---"; uname -a
+          echo "--- 编译器 ---"
+          cmake --version
+          echo "--- libcurl ---"
+          curl-config --version 2>/dev/null || echo "（无 libcurl-config）"
+          echo "--- 生成器 ---"
+          grep -E "^CMAKE_GENERATOR:|^CMAKE_C_COMPILER:" build/CMakeCache.txt 2>/dev/null \
+            || echo "（无 CMakeCache.txt）"

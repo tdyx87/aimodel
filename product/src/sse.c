@@ -116,6 +116,8 @@ int ca_sse_init(ca_sse *s, size_t frame_limit) {
     if (s == NULL) return -1;
     s->in_frame = 0;
     s->failed = 0;
+    s->start = 0;
+    s->scan_pos = 0;
     if (frame_limit == 0) frame_limit = CA_SSE_MAX_FRAME_BYTES;
     /* 上限本身也封顶：否则"传入一个很大的上限"就成了绕过封顶的后门 */
     if (frame_limit > CA_SSE_MAX_FRAME_BYTES) return -1;
@@ -136,45 +138,77 @@ void ca_sse_free(ca_sse *s) {
 
 size_t ca_sse_pending(const ca_sse *s) {
     if (s == NULL) return 0;
-    return s->acc.len;
+    return s->acc.len - s->start;
 }
 
 /* 找帧边界：空行结束帧。必须容忍 CRLF —— 契约 §4.2 明确要求。
  * 边界的字节形态有两种：
  *     ...\n\n      （LF）
  *     ...\n\r\n    （CRLF）
- * 早先只匹配相邻的 \n\n，于是 CRLF 流一帧都解析不出来。
  *
- * frame_len  = 帧内容长度（不含分隔符）
+ * frame_len  = 帧内容长度（不含分隔符），相对 start
  * *consumed  = 需要跳过的总字节数（含分隔符）
  * 未找到时返回 0。
+ *
+ * 从 scan_pos 接着扫，而不是每次从 0 重扫——后者在密集小帧下是 O(n^2)：
+ * 实测 100 MB 密集帧曾耗时 242 秒。
  */
-static size_t find_frame_end(const ca_buf *acc, size_t *consumed) {
-    for (size_t i = 0; i + 1 < acc->len; i++) {
-        if (acc->data[i] != '\n') continue;
-        /* \n\n */
-        if (acc->data[i + 1] == '\n') {
-            *consumed = i + 2;
-            return i;
+static size_t find_frame_end(ca_sse *s, size_t *consumed) {
+    size_t base = s->start;
+    size_t len = s->acc.len;
+    size_t i = base + s->scan_pos;
+    for (; i + 1 < len; i++) {
+        if (s->acc.data[i] != '\n') continue;
+        if (s->acc.data[i + 1] == '\n') {
+            s->scan_pos = i - base + 1;
+            *consumed = i + 2 - base;
+            return i - base;
         }
-        /* \n\r\n */
-        if (acc->data[i + 1] == '\r' && i + 2 < acc->len && acc->data[i + 2] == '\n') {
-            *consumed = i + 3;
-            return i;
+        if (s->acc.data[i + 1] == '\r' && i + 2 < len && s->acc.data[i + 2] == '\n') {
+            s->scan_pos = i - base + 1;
+            *consumed = i + 3 - base;
+            return i - base;
         }
     }
+    /* 没找到：记住已扫过的位置，下次从「末尾前一字节」接着扫——
+     * 边界可能横跨「旧数据最后一个字节」与「新数据第一个字节」。 */
+    s->scan_pos = (len > base) ? (len - base - 1) : 0;
     return 0;
 }
 
+/* 消费 start 之后的 consumed 字节。只挪游标，不 memmove 整个缓冲。
+ * 仅当游标推进过多时才把残留数据压回起点——否则密集帧下
+ * 每帧都要搬运整个剩余缓冲，实测会把 100 MB 拖到 242 秒。 */
 static void consume_frame(ca_sse *s, size_t flen, size_t consumed,
                           void (*on_frame)(const ca_sse_frame *, void *), void *user) {
-    emit_frame(s, s->acc.data, flen, on_frame, user);
-    if (consumed >= s->acc.len) {
+    emit_frame(s, s->acc.data + s->start, flen, on_frame, user);
+    s->start += consumed;
+    if (s->scan_pos >= consumed) s->scan_pos -= consumed;
+    else s->scan_pos = 0;
+
+    if (s->start >= s->acc.len) {
+        s->start = 0;
+        s->scan_pos = 0;
         s->acc.len = 0;
-    } else {
-        memmove(s->acc.data, s->acc.data + consumed, s->acc.len - consumed);
-        s->acc.len -= consumed;
+    } else if (s->start > s->acc.cap / 2) {
+        size_t remain = s->acc.len - s->start;
+        memmove(s->acc.data, s->acc.data + s->start, remain);
+        s->acc.len = remain;
+        s->start = 0;
+        s->scan_pos = 0;
     }
+}
+
+/* 追加前若必须腾空间，先把残留压回起点。 */
+static int compact_if_needed(ca_sse *s, size_t incoming) {
+    if (s->start == 0) return 0;
+    if (incoming <= s->acc.cap - (s->acc.len - s->start)) return 0; /* 装得下 */
+    size_t remain = s->acc.len - s->start;
+    memmove(s->acc.data, s->acc.data + s->start, remain);
+    s->acc.len = remain;
+    s->start = 0;
+    s->scan_pos = 0;
+    return 0;
 }
 
 int ca_sse_feed(ca_sse *s, const unsigned char *data, size_t n,
@@ -184,11 +218,13 @@ int ca_sse_feed(ca_sse *s, const unsigned char *data, size_t n,
     if (n == 0) return 0;
     if (data == NULL) return -1;
 
+    compact_if_needed(s, n);
+
     /* 先消化缓冲里已有的完整帧，再追加。
      * 顺序反了会把"缓冲里有半帧 + 新数据"的边界埋掉。 */
     for (;;) {
         size_t consumed = 0;
-        size_t flen = find_frame_end(&s->acc, &consumed);
+        size_t flen = find_frame_end(s, &consumed);
         if (flen == 0) break;
         consume_frame(s, flen, consumed, on_frame, user);
     }
@@ -200,9 +236,14 @@ int ca_sse_feed(ca_sse *s, const unsigned char *data, size_t n,
         return -1;
     }
 
+    /* 追加后可能出现新帧。scan_pos 仍有效（新数据只是往后延伸），
+     * 但要把游标回退一字节，以覆盖边界横跨新旧数据的情况。 */
+    if (s->acc.len > s->start && s->scan_pos > 0) s->scan_pos--;
+    else if (s->acc.len > s->start) s->scan_pos = 0;
+
     for (;;) {
         size_t consumed = 0;
-        size_t flen = find_frame_end(&s->acc, &consumed);
+        size_t flen = find_frame_end(s, &consumed);
         if (flen == 0) break;
         consume_frame(s, flen, consumed, on_frame, user);
     }

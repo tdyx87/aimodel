@@ -47,6 +47,34 @@ target_link_libraries(cagent_buf PUBLIC cagent_mem)
 add_library(cagent_sse STATIC src/sse.c)
 target_link_libraries(cagent_sse PUBLIC cagent_buf)
 
+# ---- http：传输层 ----
+# 传输做成接口（ca_transport_ops）而不是直接调 libcurl：
+#   1. 契约 C1 要求「只有流式回调」，做成接口等于结构上强制；
+#   2. 传输逻辑可在无网络下被完整测试，不必依赖网络抖动。
+find_package(CURL QUIET)
+add_library(cagent_http STATIC
+    src/transport_mem.c
+    src/transport_curl.c)
+target_link_libraries(cagent_http PUBLIC cagent_sse)
+
+if (CURL_FOUND)
+    target_link_libraries(cagent_http PRIVATE CURL::libcurl)
+    target_compile_definitions(cagent_http PRIVATE CAGENT_HAVE_CURL=1)
+    message(STATUS "cagent: 使用 libcurl 传输后端 (${CURL_VERSION_STRING})")
+else()
+    # 刻意**降级而非报错**：缺 libcurl 时其余层仍可构建与测试，
+    # 只是运行时会拒绝联网请求并在界面上说明原因。
+    # 早前把 NSIS 设为打包硬前置、结果包源一次 504 拖红整条 CI 腿，
+    # 那是依赖层级搞错的反面教材——此处不能让可选依赖变成阻塞项。
+    message(STATUS "cagent: 未找到 libcurl，仅构建内存传输后端（无法联网）")
+endif()
+
+# ---- 工具 ----
+# 空闲内存探针：NFR-1 承诺的是常驻占用，而单元测试跑完就退出，
+# 测不出那个数字。探针初始化各层后静默待命，供独立脚本采样。
+add_executable(mem_probe tools/mem_probe.c)
+target_link_libraries(mem_probe PRIVATE cagent_http)
+
 # ---- 测试 ----
 if (CAGENT_BUILD_TESTS)
     include(CTest)
@@ -62,6 +90,10 @@ if (CAGENT_BUILD_TESTS)
     add_executable(sse_test tests/sse_test.c)
     target_link_libraries(sse_test PRIVATE ca_test cagent_sse)
 
+    add_executable(http_test tests/http_test.c)
+    target_link_libraries(http_test PRIVATE ca_test cagent_http)
+
     add_test(NAME mem_test COMMAND mem_test)
     add_test(NAME sse_test COMMAND sse_test)
+    add_test(NAME http_test COMMAND http_test)
 endif()

@@ -37,8 +37,10 @@ typedef struct {
 typedef struct {
     ca_buf acc;  /* 累积中的帧 */
     ca_buf out;  /* 组装好的 data 值 */
-    int in_frame; /* 是否已开始累积一个帧 */
-    int failed;   /* 一旦置位，后续 feed 直接拒绝，不再产出帧 */
+    size_t start;   /* acc 中已消费字节数（读游标，避免每帧 memmove 整个缓冲） */
+    size_t scan_pos;/* 扫描游标：已知 [start, scan_pos) 内无帧边界 */
+    int in_frame;   /* 是否已开始累积一个帧 */
+    int failed;     /* 一旦置位，后续 feed 直接拒绝，不再产出帧 */
 } ca_sse;
 
 /* 创建。frame_limit 传 0 用 CA_SSE_MAX_FRAME_BYTES；
