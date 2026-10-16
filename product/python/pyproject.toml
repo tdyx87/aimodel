@@ -18,6 +18,18 @@ dependencies = []
 # 用 >= 而非 ==：本插件与 pytest 7/8/9 均兼容，锁死小版本只会互相打架。
 dev = ["pytest==7.4.4", "pytest-timeout>=2.3"]
 
+# 界面级 E2E（tests/e2e/test_ui_journey.py）专用，**单列而非并入 dev**。
+#
+# 为什么单列：界面 E2E 需要真实浏览器，是整套测试里对环境要求最高的一环。
+# 并入 dev 会让每个装 dev 的环境都被迫背上一个重量级依赖；而它并不覆盖
+# 全部场景——HTTP 层与产物层的关键路径另有用例。列为可选 extra，
+# 想要完整覆盖的人显式安装 `pip install -e "./python[dev,ui]"`。
+#
+# 另注意：playwright 只装 Python 包，**不下载浏览器**——测试复用系统已装的
+# Edge/Chrome（见 test_ui_journey._edge_executable）。少一个几百 MB 的
+# 下载依赖，也少一个会在 CI 上抖动的外部源（这正是 NSIS 那次的教训）。
+ui = ["playwright>=1.40"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["saveinspector_tools*"]
