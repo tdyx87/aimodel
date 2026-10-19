@@ -146,7 +146,7 @@ static int ca_is_sep(char c) { return c == '/'; }
  * macOS 报 "call to undeclared function"，Linux 报 "undefined reference"。
  * 本地只有 MSVC，这个洞一直看不见。 */
 static int ca_is_absolute(const char *p) {
-    return p != NULL && p[0] == '/';
+    return p != NULL && ca_is_sep(p[0]);
 }
 #endif
 

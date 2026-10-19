@@ -25,8 +25,15 @@
  * 用线程局部变量传递；C99 的 _Thread_local 在 MSVC 2015+ 可用。 */
 #if defined(_MSC_VER)
 #  define CA_TLS __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+/* 本项目是 **C99**，而 `_Thread_local` 是 C11 才有的。直接用它，
+ * GCC 会报 \"ISO C99 does not support '_Thread_local'\"。
+ * `__thread` 是 GCC/Clang 的等价扩展，不触发该告警。 */
+#  define CA_TLS __thread
 #else
-#  define CA_TLS _Thread_local
+/* 不支持线程局部存储时退化为普通 static。
+ * 本项目的使用场景是单线程的请求-回调配对，不会并发。 */
+#  define CA_TLS
 #endif
 
 typedef struct {

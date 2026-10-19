@@ -204,17 +204,27 @@ CA_TEST(llm_accepts_large_single_argument_fragment) {
     rec r;
     memset(&r, 0, sizeof(r));
     size_t big_len = 20000;
-    char *payload = (char *)malloc(big_len + 512);
+    /* 缓冲区必须按**实际写入量**算，不能拍脑袋给 512。
+     * 早先 malloc(big_len + 512)，却从 payload+at（≈ 20115）起再写 512 字节，
+     * 末端到 20627，而分配只有 20512 —— 真实越界。
+     * GCC 报 `specified bound 512 exceeds destination size 412` 不是误报。
+     * 改为：先在小缓冲区里量出前缀长度，再按前缀实际长度精确分配。 */
+    char head[160];
+    int hn = snprintf(head, sizeof(head),
+                      "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                      "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
+    CA_ASSERT(hn > 0 && (size_t)hn < sizeof(head));
+    if (hn <= 0 || (size_t)hn >= sizeof(head)) return;
+    size_t tail = 8; /* "\"}}]}}]}" 加结尾 NUL */
+    char *payload = (char *)malloc((size_t)hn + big_len + tail);
     CA_ASSERT(payload != NULL);
     if (payload == NULL) return;
-    int n = snprintf(payload, 512,
-                     "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
-                     "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
-    size_t at = (size_t)n;
+    memcpy(payload, head, (size_t)hn);
+    size_t at = (size_t)hn;
     for (size_t i = 0; i < big_len; i++) payload[at + i] = 'x';
     at += big_len;
-    n = snprintf(payload + at, 512, "\"}}]}}]}");
-    int rc = ca_llm_on_frame(llm, payload, at + (size_t)n, on_ev, &r);
+    int tn = snprintf(payload + at, tail, "\"}}]}}]}");
+    int rc = ca_llm_on_frame(llm, payload, at + (size_t)tn, on_ev, &r);
     CA_ASSERT_EQ_INT(rc, 0);
     size_t got = 0;
     int ov = 0;
@@ -233,17 +243,22 @@ CA_TEST(llm_marks_argument_overflow_without_truncating) {
     rec r;
     memset(&r, 0, sizeof(r));
     size_t huge = CA_LLM_MAX_ARGS_BYTES + 5000;
-    char *payload = (char *)malloc(huge + 512);
+    char head[160];
+    int hn = snprintf(head, sizeof(head),
+                      "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                      "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
+    CA_ASSERT(hn > 0 && (size_t)hn < sizeof(head));
+    if (hn <= 0 || (size_t)hn >= sizeof(head)) return;
+    size_t tail = 8;
+    char *payload = (char *)malloc((size_t)hn + huge + tail);
     CA_ASSERT(payload != NULL);
     if (payload == NULL) return;
-    int n = snprintf(payload, 512,
-                     "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
-                     "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
-    size_t at = (size_t)n;
+    memcpy(payload, head, (size_t)hn);
+    size_t at = (size_t)hn;
     for (size_t i = 0; i < huge; i++) payload[at + i] = 'x';
     at += huge;
-    n = snprintf(payload + at, 512, "\"}}]}}]}");
-    (void)ca_llm_on_frame(llm, payload, at + (size_t)n, on_ev, &r);
+    int tn = snprintf(payload + at, tail, "\"}}]}}]}");
+    (void)ca_llm_on_frame(llm, payload, at + (size_t)tn, on_ev, &r);
 
     size_t got = 0;
     int ov = 1;

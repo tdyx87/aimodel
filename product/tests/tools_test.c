@@ -26,7 +26,25 @@
 #endif
 
 static char g_result[1 << 20];
-static ca_out g_out;
+
+/* 路径分隔符早先是靠「把 #if 写进 snprintf 的参数里」来选择的：
+ *
+ *     snprintf(p, n, "%s%c%s", dir,
+ * #if defined(_WIN32)
+ *              '\\'
+ * #else
+ *              '/'
+ * #endif
+ *     );
+ *
+ * 这在 C 标准里是**未定义行为**——预处理指令出现在宏实参内部，
+ * 行为未定义。GCC/macOS 都直接报 warning。
+ * 提取成常量后既合法又可读。 */
+#if defined(_WIN32)
+#  define CA_TEST_SEP '\\'
+#else
+#  define CA_TEST_SEP '/'
+#endif
 
 /* 测试工作区建在系统临时目录，而不是仓库里。
  * 依赖仓库文件做 fixture 有两个问题：文件可能被删（本分支就删过
@@ -45,7 +63,10 @@ static const char *make_ws_dir(void) {
     snprintf(dir, sizeof(dir), "/tmp/cagent_tools_test");
 #endif
     /* 幂等清理后重建 */
-    char cmd[2048];
+    /* 缓冲区要装下两条命令 + 两份路径 + 引号语法：
+     * 只给 2048 时 GCC 算出 "writing up to 1023 bytes into a region of
+     * size between 1002 and 2025" —— 真的会截断。 */
+    char cmd[4096];
 #if defined(_WIN32)
     /* system() 本身就走 cmd.exe。不要再套一层 "cmd /c"：
      * 套了之后 '&' 会被**外层** cmd 解释，第二条命令就跑在错误的上下文里
@@ -61,13 +82,7 @@ static const char *make_ws_dir(void) {
     /* 就绪判据用「能否创建 fixture 文件」，而不是探测目录本身 ——
      * Windows 上带 '\.' 的路径 fopen 打不开，早先的探测方式恒为失败。 */
     char file[2048];
-    snprintf(file, sizeof(file), "%s%cdata.txt", dir,
-#if defined(_WIN32)
-             '\\'
-#else
-             '/'
-#endif
-    );
+    snprintf(file, sizeof(file), "%s%cdata.txt", dir, CA_TEST_SEP);;
     FILE *f = fopen(file, "wb");
     if (f == NULL) {
         printf("    工作区目录未就绪（无法创建 fixture）\n");
@@ -502,13 +517,7 @@ static void make_edit_fixture(const char *name, const char *content) {
     const char *dir = make_ws_dir();
     if (dir == NULL) return;
     char path[2048];
-    snprintf(path, sizeof(path), "%s%c%s", dir,
-#if defined(_WIN32)
-             '\\'
-#else
-             '/'
-#endif
-    , name);
+    snprintf(path, sizeof(path), "%s%c%s", dir, CA_TEST_SEP, name);
     FILE *f = fopen(path, "wb");
     if (f == NULL) return;
     fwrite(content, 1, strlen(content), f);
@@ -519,13 +528,7 @@ static char *read_ws_file(const char *name) {
     const char *dir = make_ws_dir();
     if (dir == NULL) return NULL;
     char path[2048];
-    snprintf(path, sizeof(path), "%s%c%s", dir,
-#if defined(_WIN32)
-             '\\'
-#else
-             '/'
-#endif
-    , name);
+    snprintf(path, sizeof(path), "%s%c%s", dir, CA_TEST_SEP, name);
     FILE *f = fopen(path, "rb");
     if (f == NULL) return NULL;
     static char buf[65536];
@@ -653,13 +656,7 @@ CA_TEST(edit_leaves_no_temp_file_behind) {
         CA_TOOL_OK);
     const char *dir = make_ws_dir();
     char pat[2048];
-    snprintf(pat, sizeof(pat), "%s%c*.cagent_tmp", dir,
-#if defined(_WIN32)
-             '\\'
-#else
-             '/'
-#endif
-    );
+    snprintf(pat, sizeof(pat), "%s%c*.cagent_tmp", dir, CA_TEST_SEP);;
     (void)pat; /* 目录内容由下面的路径读取间接验证：临时文件不会出现在内容里 */
     CA_ASSERT(strstr(read_ws_file("e7.txt"), "two") != NULL);
     ca_ws_free(ws);
