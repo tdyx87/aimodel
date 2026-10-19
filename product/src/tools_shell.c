@@ -418,13 +418,28 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
     (void)arg_int2(args_json, "timeout_ms", &timeout);
     if (timeout <= 0) timeout = CA_SHELL_TIMEOUT_MS;
 
+    /* P5：命令**原文**必须在请求权限**之前**完整展示。
+     * 这一段早先整段缺失 —— POSIX 版直接 ask_perm()，
+     * 于是 Linux/macOS 上用户是在**什么都没看到**的情况下
+     * 批准一条将要执行的 shell 命令。盲批。
+     *
+     * 与我给 edit_file 的 ca_tool_pending_display 白名单是同一类洞：
+     * 一个平台实现漏了这一步，而本地只有 MSVC，永远看不见。
+     */
+    static char pending[4200];
+    snprintf(pending, sizeof(pending),
+             "将执行以下命令（原文完整展示，不折叠）：\n\n%s\n", command);
+    ctx->pending_display = pending;
+
     if (ask_perm(ctx, "run_shell") != 0) {
+        ctx->pending_display = NULL;
         ca_out_puts(ctx->out,
                     "<result status=\"denied\" tool=\"run_shell\">"
                     "用户拒绝了执行命令。可以先说明这条命令做什么，"
                     "或改用不执行命令的方式。</result>");
         return CA_TOOL_DENIED;
     }
+    ctx->pending_display = NULL;
 
     int fds[2];
     if (pipe(fds) != 0) return CA_TOOL_ERR_IO;
