@@ -78,7 +78,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # 运行器自带 curl.exe，但通常**没有 MSVC 导入库**。vcpkg 提供与
           # 工具链匹配的二进制，避免从源码构建（那会拖垮 CI 时间）。
           #
@@ -118,7 +118,11 @@ jobs:
       - name: 构建（零告警为硬要求）
         shell: bash
         run: |
-          set -euo pipefail
+          # 刻意**不用 set -e**：一旦有它，cmake 失败会立刻带自己的退出码
+          # 终止脚本，下面精心准备的诊断（注解 + 步骤摘要）一行都来不及输出。
+          # 本工作流曾因此表现为「失败了但什么信息都没有」——
+          # 排查者只知道红了，连哪一步、为什么都看不到。
+          set -uo pipefail
           # $VCPKG_ROOT **只在 Windows 上存在**。早先无条件传
           #   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/.../vcpkg.cmake"
           # 在 Linux/macOS 上展开成 /scripts/buildsystems/vcpkg.cmake，
@@ -128,7 +132,21 @@ jobs:
           # 这个工作流**从来没有一次是绿的**，原因就在这里。
           CA_CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release)
           if [ "$RUNNER_OS" = "Windows" ]; then
-            CA_CMAKE_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake")
+            # 运行器上的变量名是 VCPKG_INSTALLATION_ROOT，而 CMake 的 vcpkg
+            # 工具链文档里用的是 VCPKG_ROOT。两个名字长期混用。
+            # 早先这里只认 $VCPKG_ROOT，于是 set -u 直接报
+            # "VCPKG_ROOT: unbound variable" 崩掉——而且崩在诊断之前。
+            VCPKG_HOME="${VCPKG_ROOT:-${VCPKG_INSTALLATION_ROOT:-}}"
+            if [ -z "$VCPKG_HOME" ]; then
+              echo "::error title=找不到 vcpkg 根目录::VCPKG_ROOT 与 VCPKG_INSTALLATION_ROOT 均为空"
+              exit 1
+            fi
+            if [ ! -f "$VCPKG_HOME/scripts/buildsystems/vcpkg.cmake" ]; then
+              echo "::error title=vcpkg 工具链文件不存在::$VCPKG_HOME/scripts/buildsystems/vcpkg.cmake"
+              exit 1
+            fi
+            echo "vcpkg 根目录: $VCPKG_HOME"
+            CA_CMAKE_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$VCPKG_HOME/scripts/buildsystems/vcpkg.cmake")
           fi
           # 刻意不叫 CMAKE_ARGS：那是 GitHub Actions 自己的环境变量。
           #
@@ -139,11 +157,12 @@ jobs:
           # `::error::` 注解会被命令解析器吞掉（本工作流已经吃过两次亏），
           # 而步骤摘要在网页端直接可见、不需要任何鉴权 —— 排查时最可靠。
           dump() {  # $1=标题 $2=日志文件
-            echo "### ❌ $1" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            tail -c 4000 "$2" >> "$GITHUB_STEP_SUMMARY"
-            echo >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
-            echo "::error title=$1::见本步骤摘要"
+            # 注解携带实际内容：这是唯一一条**不需要鉴权**就能读到的诊断通道。
+            echo "::error title=$1::$(tail -c 1500 "$2" | tr -d '\r' | tr '\n' ' ')"
+            {
+              echo "### ❌ $1"
+              echo '```'; tail -c 4000 "$2"; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           }
           if ! cmake -S . -B build "${CA_CMAKE_ARGS[@]}" > cfg.log 2>&1; then
             dump "CMake 配置失败" cfg.log; cat cfg.log; exit 1
@@ -162,12 +181,13 @@ jobs:
           # 日志要鉴权读不到，注解能。结果就是「谁也看不出哪里在告警」，
           # 于是告警门禁只会显示一句红字。
           if grep -qE "warning [A-Z]+[0-9]+|warning:" build.log; then
+            WARN="$(grep -E 'warning [A-Z]+[0-9]+|warning:' build.log | head -6 | tr -d '\r' | tr '\n' ' ')"
+            echo "::error title=构建产生告警::${WARN}"
             {
               echo "### ❌ 构建产生告警"
               echo '```'; grep -E "warning [A-Z]+[0-9]+|warning:" build.log | head -20
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::构建产生告警，见步骤摘要"
             exit 1
           fi
           echo "编译零告警 ✓"
@@ -186,17 +206,20 @@ jobs:
       - name: 单元测试（含 100 MB 流式内存实测）
         shell: bash
         run: |
+          # 同样**不用 set -e**：否则 ctest 的退出码 8（有测试失败）
+          # 会直接冒泡成步骤退出码，诊断语句一行都不执行。
           set -uo pipefail
           ctest --test-dir build -C Release --output-on-failure > ctest.log 2>&1
           code=$?
           tail -60 ctest.log
           if [ $code -ne 0 ]; then
+            # 注解携带**实际内容**（步骤摘要在网页端要登录才看得到，
+            # 而公开 API 能读到注解）——这两条通道互补，少一条都可能瞎。
+            echo "::error title=单元测试失败::$(grep -E 'FAIL|tests failed|断言|Error|error' ctest.log | head -6 | tr '\n' ' ')"
             {
               echo "### ❌ 单元测试失败 (ctest 退出码 $code)"
               echo '```'; tail -c 4000 ctest.log; echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::单元测试失败，见步骤摘要"
-            tail -40 ctest.log
             exit 1
           fi
 
