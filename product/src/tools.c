@@ -383,8 +383,11 @@ ca_copy_str(out, cap, norm);
 
 const char *ca_tool_pending_display(const ca_tool_ctx *ctx, const char *tool_name) {
     if (ctx == NULL || ctx->pending_display == NULL) return NULL;
+    /* 白名单：只有破坏性工具需要展示待批准内容。
+     * 漏掉任何一个，就等于该工具在**盲批**状态下被批准。 */
     if (tool_name != NULL && strcmp(tool_name, "run_shell") != 0 &&
-        strcmp(tool_name, "write_file") != 0) {
+        strcmp(tool_name, "write_file") != 0 &&
+        strcmp(tool_name, "edit_file") != 0) {
         return NULL;
     }
     return ctx->pending_display;

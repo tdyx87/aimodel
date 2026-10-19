@@ -162,6 +162,37 @@ ca_tool_status ca_tool_search(ca_tool_ctx *ctx, const ca_search_opts *opts);
  * timeout_ms 缺省或 <=0 时用 CA_SHELL_TIMEOUT_MS。 */
 ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json);
 
+/* ---- edit_file ----
+ *
+ * 按**精确匹配**替换。这条工具最大的风险不是写错，而是「匹配到多处、
+ * 全量替换」——那会静默破坏代码而不报错。
+ *
+ * 因此：
+ *   - old_string 为空一律拒绝（空串匹配所有位置）
+ *   - 出现多次且未显式 replace_all 时**拒绝**并要求更精确的上下文，
+ *     而不是替用户猜
+ *   - 落盘走「临时文件 + 原子替换」，中途失败不会留下半截文件
+ */
+
+/* 替换前的影响面统计。必须在**请求权限之前**算好——
+ * 否则用户是在「不知道会改多少」的情况下批准。契约 P2。 */
+typedef struct {
+    int occurrences;     /* old_string 出现次数 */
+    int lines_before;
+    int lines_after;
+    long long bytes_before;
+    long long bytes_after;
+} ca_edit_preview;
+
+/* 计算影响面，**不做任何修改**。
+ * 返回 CA_TOOL_OK 表示参数可解析且目标文件存在（occurrences 可能为 0）。 */
+ca_tool_status ca_tool_edit_preview(ca_tool_ctx *ctx, const char *args_json,
+                                   ca_edit_preview *out);
+
+/* 执行替换。args_json 形如
+ *   {"path":"a.c","old_string":"x","new_string":"y","replace_all":false} */
+ca_tool_status ca_tool_edit_file(ca_tool_ctx *ctx, const char *args_json);
+
 #ifdef __cplusplus
 }
 #endif

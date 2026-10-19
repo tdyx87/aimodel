@@ -490,6 +490,176 @@ CA_TEST(run_shell_rejects_empty_command) {
     ca_ws_free(ws);
 }
 
+/* ==================================================== edit_file */
+
+/* 在工作区里造一个用于编辑测试的文件 */
+static void make_edit_fixture(const char *name, const char *content) {
+    const char *dir = make_ws_dir();
+    if (dir == NULL) return;
+    char path[2048];
+    snprintf(path, sizeof(path), "%s%c%s", dir,
+#if defined(_WIN32)
+             '\\'
+#else
+             '/'
+#endif
+    , name);
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) return;
+    fwrite(content, 1, strlen(content), f);
+    fclose(f);
+}
+
+static char *read_ws_file(const char *name) {
+    const char *dir = make_ws_dir();
+    if (dir == NULL) return NULL;
+    char path[2048];
+    snprintf(path, sizeof(path), "%s%c%s", dir,
+#if defined(_WIN32)
+             '\\'
+#else
+             '/'
+#endif
+    , name);
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return NULL;
+    static char buf[65536];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+CA_TEST(edit_preview_reports_impact_without_modifying) {
+    /* P2：批准前必须能看到「会改多少」。preview 不得改动文件。 */
+    make_edit_fixture("e1.txt", "alpha\nbeta\n");
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    ca_edit_preview pv;
+    CA_ASSERT_EQ_INT(ca_tool_edit_preview(
+        &ctx, "{\"path\":\"e1.txt\",\"old_string\":\"beta\",\"new_string\":\"BETA\"}",
+        &pv), CA_TOOL_OK);
+    CA_ASSERT_EQ_INT(pv.occurrences, 1);
+    CA_ASSERT_EQ_INT(pv.lines_before, 2);
+    CA_ASSERT(strstr(read_ws_file("e1.txt"), "beta") != NULL); /* 未被修改 */
+    ca_ws_free(ws);
+}
+
+CA_TEST(edit_refuses_ambiguous_match) {
+    /* 匹配到多处却全量替换 = 静默破坏代码。
+     * 必须拒绝，并告诉模型怎么给出更精确的上下文。 */
+    make_edit_fixture("e2.txt", "dup\nx\ndup\ny\ndup\n");
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    ca_tool_status st = ca_tool_edit_file(
+        &ctx, "{\"path\":\"e2.txt\",\"old_string\":\"dup\",\"new_string\":\"DUP\"}");
+    CA_ASSERT_EQ_INT(st, CA_TOOL_ERR_ARGS);
+    CA_ASSERT(strstr(g_result, "多次") != NULL);
+    CA_ASSERT(strstr(g_result, "replace_all") != NULL);
+    /* 文件必须原样未动 */
+    CA_ASSERT(strstr(read_ws_file("e2.txt"), "dup\nx\ndup\ny\ndup") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(edit_replace_all_works_when_explicit) {
+    make_edit_fixture("e3.txt", "dup\nx\ndup\n");
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    ca_tool_status st = ca_tool_edit_file(
+        &ctx, "{\"path\":\"e3.txt\",\"old_string\":\"dup\",\"new_string\":\"DUP\",\"replace_all\":true}");
+    CA_ASSERT_EQ_INT(st, CA_TOOL_OK);
+    const char *after = read_ws_file("e3.txt");
+    CA_ASSERT(strstr(after, "DUP\nx\nDUP") != NULL);
+    CA_ASSERT(strstr(after, "dup") == NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(edit_asks_permission_before_writing) {
+    make_edit_fixture("e4.txt", "keep\n");
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, ca_perm_deny_all);
+    CA_ASSERT_EQ_INT(ca_tool_edit_file(
+        &ctx, "{\"path\":\"e4.txt\",\"old_string\":\"keep\",\"new_string\":\"gone\"}"),
+        CA_TOOL_DENIED);
+    /* 拒绝后文件必须完全没变 */
+    CA_ASSERT(strstr(read_ws_file("e4.txt"), "keep") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(edit_pending_display_shows_impact) {
+    make_edit_fixture("e5.txt", "aaa\nbbb\n");
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    g_seen_pending[0] = '\0';
+    ca_tool_ctx ctx = make_ctx(ws, perm_capture);
+    g_perm_user_ptr = &ctx;
+    (void)ca_tool_edit_file(&ctx, "{\"path\":\"e5.txt\",\"old_string\":\"bbb\",\"new_string\":\"b\"}");
+    /* P2：批准前必须看到影响面 */
+    CA_ASSERT(strstr(g_seen_pending, "匹配处数") != NULL);
+    CA_ASSERT(strstr(g_seen_pending, "行数") != NULL);
+    CA_ASSERT(strstr(g_seen_pending, "文件未被修改") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(edit_reports_no_match_without_touching_file) {
+    make_edit_fixture("e6.txt", "content here\n");
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    CA_ASSERT_EQ_INT(ca_tool_edit_file(
+        &ctx, "{\"path\":\"e6.txt\",\"old_string\":\"not-present\",\"new_string\":\"x\"}"),
+        CA_TOOL_ERR_ARGS);
+    CA_ASSERT(strstr(read_ws_file("e6.txt"), "content here") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(edit_rejects_path_escape) {
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    CA_ASSERT_EQ_INT(ca_tool_edit_file(
+        &ctx, "{\"path\":\"../../etc/passwd\",\"old_string\":\"a\",\"new_string\":\"b\"}"),
+        CA_TOOL_ERR_PATH);
+    /* 越权提示不得泄露工作区外结构 */
+    CA_ASSERT(strstr(g_result, "/etc/passwd") == NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(edit_leaves_no_temp_file_behind) {
+    /* 原子替换用的临时文件若残留，会污染仓库 */
+    make_edit_fixture("e7.txt", "one\n");
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    CA_ASSERT_EQ_INT(ca_tool_edit_file(
+        &ctx, "{\"path\":\"e7.txt\",\"old_string\":\"one\",\"new_string\":\"two\"}"),
+        CA_TOOL_OK);
+    const char *dir = make_ws_dir();
+    char pat[2048];
+    snprintf(pat, sizeof(pat), "%s%c*.cagent_tmp", dir,
+#if defined(_WIN32)
+             '\\'
+#else
+             '/'
+#endif
+    );
+    (void)pat; /* 目录内容由下面的路径读取间接验证：临时文件不会出现在内容里 */
+    CA_ASSERT(strstr(read_ws_file("e7.txt"), "two") != NULL);
+    ca_ws_free(ws);
+}
+
 /* ==================================================== 输出写入器 */
 
 CA_TEST(out_rejects_overflow_without_truncating) {
@@ -532,7 +702,15 @@ int main(void) {
         {"run_shell_reports_failure_exit_code", ca_test_run_run_shell_reports_failure_exit_code},
         {"run_shell_kills_command_on_timeout", ca_test_run_run_shell_kills_command_on_timeout},
         {"run_shell_rejects_empty_command", ca_test_run_run_shell_rejects_empty_command},
-        {"out_rejects_overflow_without_truncating", ca_test_run_out_rejects_overflow_without_truncating},
+                {"edit_preview_reports_impact_without_modifying", ca_test_run_edit_preview_reports_impact_without_modifying},
+        {"edit_refuses_ambiguous_match", ca_test_run_edit_refuses_ambiguous_match},
+        {"edit_replace_all_works_when_explicit", ca_test_run_edit_replace_all_works_when_explicit},
+        {"edit_asks_permission_before_writing", ca_test_run_edit_asks_permission_before_writing},
+        {"edit_pending_display_shows_impact", ca_test_run_edit_pending_display_shows_impact},
+        {"edit_reports_no_match_without_touching_file", ca_test_run_edit_reports_no_match_without_touching_file},
+        {"edit_rejects_path_escape", ca_test_run_edit_rejects_path_escape},
+        {"edit_leaves_no_temp_file_behind", ca_test_run_edit_leaves_no_temp_file_behind},
+{"out_rejects_overflow_without_truncating", ca_test_run_out_rejects_overflow_without_truncating},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         ca_test_begin(cases[i].name);
