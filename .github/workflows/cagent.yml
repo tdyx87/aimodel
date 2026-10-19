@@ -68,16 +68,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          set -e
-          # 运行器自带 curl，但通常没有 MSVC 导入库。vcpkg 提供
-          # 与工具链匹配的二进制，避免从源码构建（那会拖垮 CI 时间）。
-          echo "VCPKG_INSTALLATION_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT }}" >> "$GITHUB_ENV"
-          if [ -z "$VCPKG_INSTALLATION_ROOT" ]; then
+          set -euo pipefail
+          # 运行器自带 curl.exe，但通常**没有 MSVC 导入库**。vcpkg 提供与
+          # 工具链匹配的二进制，避免从源码构建（那会拖垮 CI 时间）。
+          #
+          # 两个早先的错误让这一腿从来没跑起来过：
+          #  1. `${{ env.VCPKG_INSTALLATION_ROOT }}` —— VCPKG_INSTALLATION_ROOT
+          #     是**运行器镜像的 shell 环境变量**，不在 Actions 的 `env` 上下文里，
+          #     所以它被展开成空字符串。
+          #  2. GITHUB_ENV 只接受 `KEY=value`，却写成了 `KEY: value`，
+          #     于是运行器在**第一步**就报 `Invalid format` 直接崩掉。
+          # 正确做法：直接在 shell 里读，用 `=` 分隔。
+          if [ -z "${VCPKG_INSTALLATION_ROOT:-}" ]; then
             echo "::error::未找到 vcpkg，Windows 腿只能构建内存后端"
             exit 1
           fi
+          echo "VCPKG_INSTALLATION_ROOT=${VCPKG_INSTALLATION_ROOT}" >> "$GITHUB_ENV"
           vcpkg install curl:x64-windows-static-md
-          echo "VCPKG_INSTALLED_DIR: $VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> "$GITHUB_ENV"
+          echo "VCPKG_INSTALLED_DIR=${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static-md" >> "$GITHUB_ENV"
+          echo "vcpkg 就绪: ${VCPKG_INSTALLATION_ROOT}"
 
       - name: 准备 Python（用于内存实测交叉核对）
         uses: actions/setup-python@v5
@@ -100,9 +109,23 @@ jobs:
             CA_CMAKE_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake")
           fi
           # 刻意不叫 CMAKE_ARGS：那是 GitHub Actions 自己的环境变量。
-          cmake -S . -B build "${CA_CMAKE_ARGS[@]}"
+          #
+          # 失败原因写进 **注解** 而不是只留在 job 日志里：
+          # 注解能被公开 API 读到，日志不能（要鉴权）。排查时这一点很关键——
+          # 早先的失败日志谁也看不到，于是「它一直在红」这件事长期无人知晓。
+          if ! cmake -S . -B build "${CA_CMAKE_ARGS[@]}" > cfg.log 2>&1; then
+            echo "::error title=CMake 配置失败::$(tail -c 1800 cfg.log | tr '\n' ' ')"
+            cat cfg.log
+            exit 1
+          fi
+          cat cfg.log
           # pipefail：没有它，`cmake --build | tee` 会把构建失败吞成 0
-          cmake --build build --config Release 2>&1 | tee build.log
+          if ! cmake --build build --config Release > build.log 2>&1; then
+            echo "::error title=构建失败::$(tail -c 1800 build.log | tr '\n' ' ')"
+            cat build.log
+            exit 1
+          fi
+          cat build.log
           # 两种工具链的告警格式都要覆盖：
           #   MSVC   -> `warning C4996`
           #   GCC    -> `warning:`（后面跟文字，不是字母数字）
