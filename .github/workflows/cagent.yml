@@ -290,9 +290,17 @@ jobs:
             exit 1
           fi
           echo "探针: $EXE"
-          if ! python scripts/verify_memory.py --exe "$EXE" --budget-mb 8 > mem.log 2>&1; then
-            echo "::error title=内存承诺未达成::$(tail -c 1200 mem.log | tr '\n' ' ')"
-            cat mem.log
+          if ! python3 scripts/verify_memory.py --exe "$EXE" --budget-mb 8 > mem.log 2>&1; then
+            {
+              echo "### ❌ 内存承诺未达成"
+              echo '```'; tail -c 4000 mem.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            # 逐行发注解：traceback 有多行，压成一行会被截断成「Traceback...」而看不到原因
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 8 ] && break
+              echo "::error title=内存#$n::${line}"
+            done < <(tail -8 mem.log)
             exit 1
           fi
           cat mem.log
