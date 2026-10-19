@@ -91,10 +91,48 @@ def rss_bytes(pid: int) -> int:
     if statm.is_file():
         fields = statm.read_text().split()
         return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
-    raise OSError("该平台无法读取 /proc/<pid>/statm")
+
+    # macOS / BSD **没有 /proc**。`ps -o rss=` 在两者上都可用，单位 KB。
+    #
+    # 早先的文件头写着「没有 /proc 时会退回 psutil 或 ps」，
+    # 而实现里**根本没有这个分支**——macOS 上内存门禁直接不可用，
+    # 且报错信息还写得很像那么回事（「该平台无法读取 /proc/<pid>/statm」）。
+    #
+    # 这是第四次「覆盖幻觉」：文档/注释声称覆盖了什么，代码里没有。
+    #   1. Windows 超时用例用 sleep（cmd 里没有），目标分支一次没跑到
+    #   2. 告警门禁只匹配 MSVC 格式，GCC 的 12 条全漏检
+    #   3. 符号链接用例把链接建在 CWD，防护从没被真正测过
+    #   4. 这一处：注释承诺的降级路径不存在
+    #
+    # 教训：**验证机制本身的覆盖范围，也必须被验证。**
+    # 一条从未被执行过的降级路径，等于没有。
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return int(out.stdout.strip()) * 1024
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    raise OSError("无法读取 RSS：/proc 不可用，且 ps 取值失败")
+
+
+def _force_utf8_output() -> None:
+    """Windows 控制台默认是 cp1252，打印中文会抛 UnicodeEncodeError。
+
+    早先没做这件事，于是内存门禁在 Windows 上**根本没跑起来**——
+    脚本在第一行 print 就崩了，报告的是 traceback 而不是内存数字。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
 
 
 def main() -> int:
+    _force_utf8_output()
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", required=True, help="可执行文件路径")
     ap.add_argument("--budget-mb", type=float, default=8.0, help="RSS 预算（MB）")
