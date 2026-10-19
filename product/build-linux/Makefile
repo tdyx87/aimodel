@@ -179,6 +179,19 @@ cagent_json/fast:
 .PHONY : cagent_json/fast
 
 #=============================================================================
+# Target rules for targets named cagent_ui
+
+# Build rule for target.
+cagent_ui: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cagent_ui
+.PHONY : cagent_ui
+
+# fast build rule for target.
+cagent_ui/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_ui.dir/build.make CMakeFiles/cagent_ui.dir/build
+.PHONY : cagent_ui/fast
+
+#=============================================================================
 # Target rules for targets named cagent_tools
 
 # Build rule for target.
@@ -673,6 +686,19 @@ llm_test/fast:
 .PHONY : llm_test/fast
 
 #=============================================================================
+# Target rules for targets named ui_test
+
+# Build rule for target.
+ui_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 ui_test
+.PHONY : ui_test
+
+# fast build rule for target.
+ui_test/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ui_test.dir/build.make CMakeFiles/ui_test.dir/build
+.PHONY : ui_test/fast
+
+#=============================================================================
 # Target rules for targets named tools_test
 
 # Build rule for target.
@@ -925,6 +951,54 @@ src/transport_mem.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_http.dir/build.make CMakeFiles/cagent_http.dir/src/transport_mem.c.s
 .PHONY : src/transport_mem.c.s
 
+src/ui.o: src/ui.c.o
+.PHONY : src/ui.o
+
+# target to build an object file
+src/ui.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_ui.dir/build.make CMakeFiles/cagent_ui.dir/src/ui.c.o
+.PHONY : src/ui.c.o
+
+src/ui.i: src/ui.c.i
+.PHONY : src/ui.i
+
+# target to preprocess a source file
+src/ui.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_ui.dir/build.make CMakeFiles/cagent_ui.dir/src/ui.c.i
+.PHONY : src/ui.c.i
+
+src/ui.s: src/ui.c.s
+.PHONY : src/ui.s
+
+# target to generate assembly for a file
+src/ui.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_ui.dir/build.make CMakeFiles/cagent_ui.dir/src/ui.c.s
+.PHONY : src/ui.c.s
+
+src/ui_term.o: src/ui_term.c.o
+.PHONY : src/ui_term.o
+
+# target to build an object file
+src/ui_term.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_ui.dir/build.make CMakeFiles/cagent_ui.dir/src/ui_term.c.o
+.PHONY : src/ui_term.c.o
+
+src/ui_term.i: src/ui_term.c.i
+.PHONY : src/ui_term.i
+
+# target to preprocess a source file
+src/ui_term.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_ui.dir/build.make CMakeFiles/cagent_ui.dir/src/ui_term.c.i
+.PHONY : src/ui_term.c.i
+
+src/ui_term.s: src/ui_term.c.s
+.PHONY : src/ui_term.s
+
+# target to generate assembly for a file
+src/ui_term.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cagent_ui.dir/build.make CMakeFiles/cagent_ui.dir/src/ui_term.c.s
+.PHONY : src/ui_term.c.s
+
 tests/ca_test.o: tests/ca_test.c.o
 .PHONY : tests/ca_test.o
 
@@ -1093,6 +1167,30 @@ tests/tools_test.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/tools_test.dir/build.make CMakeFiles/tools_test.dir/tests/tools_test.c.s
 .PHONY : tests/tools_test.c.s
 
+tests/ui_test.o: tests/ui_test.c.o
+.PHONY : tests/ui_test.o
+
+# target to build an object file
+tests/ui_test.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ui_test.dir/build.make CMakeFiles/ui_test.dir/tests/ui_test.c.o
+.PHONY : tests/ui_test.c.o
+
+tests/ui_test.i: tests/ui_test.c.i
+.PHONY : tests/ui_test.i
+
+# target to preprocess a source file
+tests/ui_test.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ui_test.dir/build.make CMakeFiles/ui_test.dir/tests/ui_test.c.i
+.PHONY : tests/ui_test.c.i
+
+tests/ui_test.s: tests/ui_test.c.s
+.PHONY : tests/ui_test.s
+
+# target to generate assembly for a file
+tests/ui_test.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/ui_test.dir/build.make CMakeFiles/ui_test.dir/tests/ui_test.c.s
+.PHONY : tests/ui_test.c.s
+
 tools/mem_probe.o: tools/mem_probe.c.o
 .PHONY : tools/mem_probe.o
 
@@ -1162,6 +1260,7 @@ help:
 	@echo "... cagent_mem"
 	@echo "... cagent_sse"
 	@echo "... cagent_tools"
+	@echo "... cagent_ui"
 	@echo "... http_test"
 	@echo "... json_test"
 	@echo "... llm_test"
@@ -1169,6 +1268,7 @@ help:
 	@echo "... mem_test"
 	@echo "... sse_test"
 	@echo "... tools_test"
+	@echo "... ui_test"
 	@echo "... src/buf.o"
 	@echo "... src/buf.i"
 	@echo "... src/buf.s"
@@ -1199,6 +1299,12 @@ help:
 	@echo "... src/transport_mem.o"
 	@echo "... src/transport_mem.i"
 	@echo "... src/transport_mem.s"
+	@echo "... src/ui.o"
+	@echo "... src/ui.i"
+	@echo "... src/ui.s"
+	@echo "... src/ui_term.o"
+	@echo "... src/ui_term.i"
+	@echo "... src/ui_term.s"
 	@echo "... tests/ca_test.o"
 	@echo "... tests/ca_test.i"
 	@echo "... tests/ca_test.s"
@@ -1220,6 +1326,9 @@ help:
 	@echo "... tests/tools_test.o"
 	@echo "... tests/tools_test.i"
 	@echo "... tests/tools_test.s"
+	@echo "... tests/ui_test.o"
+	@echo "... tests/ui_test.i"
+	@echo "... tests/ui_test.s"
 	@echo "... tools/mem_probe.o"
 	@echo "... tools/mem_probe.i"
 	@echo "... tools/mem_probe.s"

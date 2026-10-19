@@ -715,7 +715,7 @@ int main(void) {
         {"run_shell_reports_failure_exit_code", ca_test_run_run_shell_reports_failure_exit_code},
         {"run_shell_kills_command_on_timeout", ca_test_run_run_shell_kills_command_on_timeout},
         {"run_shell_rejects_empty_command", ca_test_run_run_shell_rejects_empty_command},
-                {"edit_preview_reports_impact_without_modifying", ca_test_run_edit_preview_reports_impact_without_modifying},
+        {"edit_preview_reports_impact_without_modifying", ca_test_run_edit_preview_reports_impact_without_modifying},
         {"edit_refuses_ambiguous_match", ca_test_run_edit_refuses_ambiguous_match},
         {"edit_replace_all_works_when_explicit", ca_test_run_edit_replace_all_works_when_explicit},
         {"edit_asks_permission_before_writing", ca_test_run_edit_asks_permission_before_writing},
@@ -723,7 +723,7 @@ int main(void) {
         {"edit_reports_no_match_without_touching_file", ca_test_run_edit_reports_no_match_without_touching_file},
         {"edit_rejects_path_escape", ca_test_run_edit_rejects_path_escape},
         {"edit_leaves_no_temp_file_behind", ca_test_run_edit_leaves_no_temp_file_behind},
-{"out_rejects_overflow_without_truncating", ca_test_run_out_rejects_overflow_without_truncating},
+        {"out_rejects_overflow_without_truncating", ca_test_run_out_rejects_overflow_without_truncating},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         ca_test_begin(cases[i].name);
