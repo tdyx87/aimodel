@@ -248,13 +248,22 @@ jobs:
             echo "::error title=单元测试失败::ctest 退出码 $code，详见下方日志注解与步骤摘要"
             # 把日志**逐行**发成注解：这是唯一一条不需要鉴权就能读的通道
             # （job 日志要鉴权，步骤摘要在网页端要登录）。
-            # 单条注解有长度上限，而崩溃现场恰恰很长，所以切成多条。
+            #
+            # 只取 `[ RUN ] / [ ok ] / [FAIL]` 的轨迹：verbose 日志有几千行，
+            # 整段塞进注解会被截断，而崩溃现场恰恰在**最后一条 [ RUN ]**。
             n=0
             while IFS= read -r line; do
               n=$((n + 1))
               [ "$n" -gt 30 ] && break
-              echo "::error title=日志#$n::${line}"
-            done < <(tail -c 8000 ctest.log)
+              echo "::error title=轨迹#$n::${line}"
+            done < <(grep -aE '^[0-9]+: +\[' ctest.log | tail -30)
+            # 再补上崩溃/异常附近的原始行
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1))
+              [ "$n" -gt 15 ] && break
+              echo "::error title=现场#$n::${line}"
+            done < <(grep -aE 'Exception|Test #|tests passed|tests failed|FAILED' ctest.log | head -15)
             exit 1
           fi
 
