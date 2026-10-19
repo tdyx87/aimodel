@@ -130,8 +130,12 @@ jobs:
           #   MSVC   -> `warning C4996`
           #   GCC    -> `warning:`（后面跟文字，不是字母数字）
           # 早先只匹配前一种，等于 Linux 上的告警全部漏检。
+          #
+          # 告警内容必须写进**注解**，不能只 echo 到日志：
+          # 日志要鉴权读不到，注解能。结果就是「谁也看不出哪里在告警」，
+          # 于是告警门禁只会显示一句红字。
           if grep -qE "warning [A-Z]+[0-9]+|warning:" build.log; then
-            echo "::error::构建产生告警，按门禁要求拒绝"
+            echo "::error title=构建产生告警::$(grep -E 'warning [A-Z]+[0-9]+|warning:' build.log | head -8 | tr '\n' ' ')"
             grep -E "warning [A-Z]+[0-9]+|warning:" build.log | head -20
             exit 1
           fi
@@ -150,7 +154,15 @@ jobs:
 
       - name: 单元测试（含 100 MB 流式内存实测）
         shell: bash
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: |
+          set -uo pipefail
+          ctest --test-dir build -C Release --output-on-failure > ctest.log 2>&1
+          code=$?
+          tail -60 ctest.log
+          if [ $code -ne 0 ]; then
+            echo "::error title=单元测试失败::$(grep -E 'FAIL|断言|tests failed' ctest.log | head -6 | tr '\n' ' ')"
+            exit 1
+          fi
 
       # 内存承诺必须由**独立脚本**复核，而不是产品自己报告。
       # 内置的内存查询服务于用户，验收脚本服务于门禁，两者不能是同一个东西。
