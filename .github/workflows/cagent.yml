@@ -237,13 +237,20 @@ jobs:
           code=$?
           tail -60 ctest.log
           if [ $code -ne 0 ]; then
-            # 注解携带**实际内容**（步骤摘要在网页端要登录才看得到，
-            # 而公开 API 能读到注解）——这两条通道互补，少一条都可能瞎。
-            echo "::error title=单元测试失败::$(grep -A6 'The following tests FAILED' ctest.log | tr '\n' ' ')$(grep -E '\[FAIL\]|Bus error|Exception|断言' ctest.log | head -8 | tr -d '\r' | tr '\n' ' ')"
             {
               echo "### ❌ 单元测试失败 (ctest 退出码 $code)"
               echo '```'; tail -c 4000 ctest.log; echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=单元测试失败::ctest 退出码 $code，详见下方日志注解与步骤摘要"
+            # 把日志**逐行**发成注解：这是唯一一条不需要鉴权就能读的通道
+            # （job 日志要鉴权，步骤摘要在网页端要登录）。
+            # 单条注解有长度上限，而崩溃现场恰恰很长，所以切成多条。
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1))
+              [ "$n" -gt 30 ] && break
+              echo "::error title=日志#$n::${line}"
+            done < <(tail -c 8000 ctest.log)
             exit 1
           fi
 
