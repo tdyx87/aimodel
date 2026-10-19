@@ -13,8 +13,29 @@ void ca_json_init(ca_json_cursor *c, const char *text, size_t len) {
     c->pos = 0;
 }
 
+/* 失败时把 out 置为一个**确定安全**的空游标。
+ *
+ * 早先 ca_json_field / ca_json_index 在返回 0 / -1 时**根本不写 *out**，
+ * 调用方那个未初始化的 `ca_json_cursor v;` 里仍是栈上的垃圾。
+ * 只要忽略返回值就直接用 v，下一次解引用就是野指针——ASan 实测 SEGV，
+ * Windows/macOS 上表现为间歇性崩溃（崩不崩取决于栈上恰好残留什么）。
+ *
+ * 「文档写清楚 out 只在成功时有效」是不够的：
+ * 让每个调用方都记住这条，成本高且迟早有人忘。
+ * 重复犯的从来不是调用方，是 API 本身——
+ * 它把一个必然出错的写法暴露出来，却没有任何东西阻止它。
+ */
+static void json_poison(ca_json_cursor *out) {
+    if (out != NULL) {
+        out->s = NULL;
+        out->len = 0;
+        out->pos = 0;
+    }
+}
+
 void ca_json_skip_ws(ca_json_cursor *c) {
-    if (c == NULL) return;
+    /* s == NULL 说明游标被毒化或从未初始化 */
+    if (c == NULL || c->s == NULL) return;
     while (c->pos < c->len) {
         char ch = c->s[c->pos];
         if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
@@ -26,7 +47,7 @@ void ca_json_skip_ws(ca_json_cursor *c) {
 }
 
 char ca_json_peek(const ca_json_cursor *c) {
-    if (c == NULL || c->pos >= c->len) return '\0';
+    if (c == NULL || c->s == NULL || c->pos >= c->len) return '\0';
     return c->s[c->pos];
 }
 
@@ -45,7 +66,7 @@ static void skip_string(ca_json_cursor *c) {
 }
 
 int ca_json_skip_value(ca_json_cursor *c) {
-    if (c == NULL) return -1;
+    if (c == NULL || c->s == NULL) return -1;
     ca_json_skip_ws(c);
     if (c->pos >= c->len) return -1;
     char ch = c->s[c->pos];
@@ -93,7 +114,7 @@ int ca_json_skip_value(ca_json_cursor *c) {
 }
 
 int ca_json_enter_object(ca_json_cursor *c) {
-    if (c == NULL) return -1;
+    if (c == NULL || c->s == NULL) return -1;
     ca_json_skip_ws(c);
     if (ca_json_peek(c) != '{') return -1;
     c->pos++;
@@ -101,7 +122,7 @@ int ca_json_enter_object(ca_json_cursor *c) {
 }
 
 int ca_json_enter_array(ca_json_cursor *c) {
-    if (c == NULL) return -1;
+    if (c == NULL || c->s == NULL) return -1;
     ca_json_skip_ws(c);
     if (ca_json_peek(c) != '[') return -1;
     c->pos++;
@@ -109,6 +130,7 @@ int ca_json_enter_array(ca_json_cursor *c) {
 }
 
 int ca_json_field(ca_json_cursor *c, const char *name, ca_json_cursor *out) {
+    json_poison(out); /* 先毒化：失败路径也留下确定安全的状态 */
     if (c == NULL || name == NULL) return -1;
     size_t name_len = strlen(name);
     /* 操作对象是**已进入**的对象（调用方已调 ca_json_enter_object）。
@@ -153,6 +175,7 @@ int ca_json_field(ca_json_cursor *c, const char *name, ca_json_cursor *out) {
 }
 
 int ca_json_index(ca_json_cursor *c, size_t index, ca_json_cursor *out) {
+    json_poison(out); /* 同上 */
     if (c == NULL) return -1;
     /* 同样是**已进入**的数组，不重复检查 '[' */
     size_t i = 0;
@@ -178,7 +201,7 @@ int ca_json_index(ca_json_cursor *c, size_t index, ca_json_cursor *out) {
 }
 
 long ca_json_array_count(ca_json_cursor *c) {
-    if (c == NULL) return -1;
+    if (c == NULL || c->s == NULL) return -1;
     /* 与 field/index 一致：操作**已进入**的数组。
      * 早先在这里调 enter_array，与调用方的用法冲突。 */
     long count = 0;
@@ -201,7 +224,7 @@ long ca_json_array_count(ca_json_cursor *c) {
 }
 
 int ca_json_read_string(ca_json_cursor *c, char *buf, size_t cap, size_t *out_len) {
-    if (c == NULL || buf == NULL) return -3;
+    if (c == NULL || c->s == NULL || buf == NULL) return -3;
     ca_json_skip_ws(c);
     if (ca_json_peek(c) != '"') return -1;
 
@@ -375,7 +398,7 @@ int ca_json_append_string(ca_json_cursor *c, char *dst, size_t cap, size_t *len)
 }
 
 int ca_json_read_int(ca_json_cursor *c, long long *out) {
-    if (c == NULL || out == NULL) return -2;
+    if (c == NULL || c->s == NULL || out == NULL) return -2;
     ca_json_skip_ws(c);
     size_t start = c->pos;
     long long sign = 1;

@@ -133,6 +133,52 @@ CA_TEST(json_array_index_out_of_range) {
     CA_ASSERT(ca_json_index(&arr, 5, &out) == 0);
 }
 
+CA_TEST(json_field_poisons_out_on_failure) {
+    /* 这条用例锁死一个真实的野指针 bug。
+     *
+     * ca_json_field / ca_json_index 在返回 0（未找到）或 -1（语法错）时
+     * **不写 *out**。调用方的 `ca_json_cursor v;` 是未初始化的，
+     * 一旦忽略返回值就直接用，下一次解引用就是栈上的野指针。
+     *
+     * ASan 实测 SEGV，Windows/macOS 上是间歇性崩溃——
+     * 「崩不崩」取决于栈上恰好残留什么，这类 bug 最难查。
+     *
+     * 这里把 out **预先投毒**（塞满 0xEE），再验证库会把它覆盖成安全值。
+     * 修在库里而不是修在调用方：「文档写清楚」永远拦不住一个忘了看文档的人。
+     */
+    ca_json_cursor poisoned;
+    memset(&poisoned, 0xEE, sizeof(poisoned));
+
+    const char *no_field = "{\"b\":1}";
+    ca_json_cursor root;
+    ca_json_init(&root, no_field, strlen(no_field));
+    CA_ASSERT(ca_json_enter_object(&root) == 0);
+    memset(&poisoned, 0xEE, sizeof(poisoned));
+    CA_ASSERT(ca_json_field(&root, "missing", &poisoned) == 0);
+    CA_ASSERT(poisoned.s == NULL);          /* 已被库确定化 */
+    CA_ASSERT(poisoned.len == 0);
+    /* 拿着这个「失败产物」继续用，必须得到错误而不是崩溃 */
+    char buf[32];
+    CA_ASSERT(ca_json_read_string(&poisoned, buf, sizeof(buf), NULL) != 0);
+    CA_ASSERT(ca_json_skip_value(&poisoned) != 0);
+    CA_ASSERT(ca_json_read_int(&poisoned, NULL) != 0);
+
+    /* 语法错同样必须毒化 */
+    const char *broken = "{\"a\"";
+    ca_json_init(&root, broken, strlen(broken));
+    memset(&poisoned, 0xEE, sizeof(poisoned));
+    (void)ca_json_field(&root, "a", &poisoned);
+    CA_ASSERT(poisoned.s == NULL);
+
+    /* index 的失败路径也一样 */
+    const char *no_index = "[1,2]";
+    ca_json_init(&root, no_index, strlen(no_index));
+    CA_ASSERT(ca_json_enter_array(&root) == 0);
+    memset(&poisoned, 0xEE, sizeof(poisoned));
+    CA_ASSERT(ca_json_index(&root, 9, &poisoned) == 0);
+    CA_ASSERT(poisoned.s == NULL);
+}
+
 CA_TEST(json_rejects_malformed_input_without_crashing) {
     /* 畸形输入是常态（流被截断、服务端出错）。逐一验证不崩溃、
      * 不越界、返回可辨识的错误码。 */
@@ -215,6 +261,7 @@ int main(void) {
         {"json_skips_nested_structures", ca_test_run_json_skips_nested_structures},
         {"json_counts_array_elements", ca_test_run_json_counts_array_elements},
         {"json_array_index_out_of_range", ca_test_run_json_array_index_out_of_range},
+        {"json_field_poisons_out_on_failure", ca_test_run_json_field_poisons_out_on_failure},
         {"json_rejects_malformed_input_without_crashing", ca_test_run_json_rejects_malformed_input_without_crashing},
         {"json_is_allocation_free", ca_test_run_json_is_allocation_free},
     };
