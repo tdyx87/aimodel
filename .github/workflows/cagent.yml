@@ -246,24 +246,21 @@ jobs:
               echo '```'; tail -c 4000 ctest.log; echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::error title=单元测试失败::ctest 退出码 $code，详见下方日志注解与步骤摘要"
-            # 把日志**逐行**发成注解：这是唯一一条不需要鉴权就能读的通道
-            # （job 日志要鉴权，步骤摘要在网页端要登录）。
-            #
-            # 只取 `[ RUN ] / [ ok ] / [FAIL]` 的轨迹：verbose 日志有几千行，
-            # 整段塞进注解会被截断，而崩溃现场恰恰在**最后一条 [ RUN ]**。
+            # 注解**条数**有限（几十行就可能被丢弃），所以只发最关键的：
+            #   1) 失败用例名（「The following tests FAILED」段落）
+            #   2) 最后 3 条 [ RUN ] —— 崩溃点就在这里
+            # 曾��整段塞进去，结果 verbose 日志几千行把注解配额吃光，
+            # 真正要看的部分反而没发出来。
             n=0
             while IFS= read -r line; do
-              n=$((n + 1))
-              [ "$n" -gt 30 ] && break
-              echo "::error title=轨迹#$n::${line}"
-            done < <(grep -aE '^[0-9]+: +\[' ctest.log | tail -30)
-            # 再补上崩溃/异常附近的原始行
+              n=$((n + 1)); [ "$n" -gt 6 ] && break
+              echo "::error title=失败清单#$n::${line}"
+            done < <(grep -aA5 'The following tests FAILED' ctest.log | head -6)
             n=0
             while IFS= read -r line; do
-              n=$((n + 1))
-              [ "$n" -gt 15 ] && break
-              echo "::error title=现场#$n::${line}"
-            done < <(grep -aE 'Exception|Test #|tests passed|tests failed|FAILED' ctest.log | head -15)
+              n=$((n + 1)); [ "$n" -gt 3 ] && break
+              echo "::error title=最后轨迹#$n::${line}"
+            done < <(grep -aE '^[0-9]+: *\[ *(RUN|FAIL)' ctest.log | tail -3)
             exit 1
           fi
 
