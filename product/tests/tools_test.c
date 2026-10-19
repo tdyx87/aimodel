@@ -167,15 +167,25 @@ CA_TEST(path_rejects_absolute_outside_on_relative_root) {
 
 #if !defined(_WIN32)
 CA_TEST(path_rejects_symlink_escape) {
-    /* 工作区内一个指向外部的符号链接 —— 最常见的逃逸方式，
-     * 只测 ../ 是测不出它的。契约 P4 明确要求覆盖。 */
-    char link_path[3072]; /* 比 cwd 大：GCC 的 -Wformat-truncation 指出
-                           * 2048 装不下「cwd(2048) + 后缀」，会静默截断。
-                           * 截断后的路径会让这个用例测不到它想测的东西，
-                           * 却照样显示「通过」。 */
-    char cwd[2048];
-    CA_ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
-    int n = snprintf(link_path, sizeof(link_path), "%s/cagent_test_symlink", cwd);
+    /* 符号链接必须建在**工作区里面**。
+     *
+     * 早先这里用的是 getcwd()——也就是 CWD，而工作区在 /tmp/cagent_tools_test。
+     * 两者根本不是同一个目录，于是：
+     *   realpath("<ws>/cagent_test_symlink/passwd") 失败（它不存在）
+     *   -> 退到 realpath_ancestor()，拿到的祖先是工作区本身
+     *   -> is_within(真) -> 返回 0
+     * 断言 rc == -1 失败。
+     *
+     * 更糟的是：这个用例**在任何平台上都没真正测到符号链接逃逸防护**，
+     * 它只是在测「一个不存在的路径能不能解析」。
+     * 注释里「P4 要求覆盖」写得很响，实际覆盖的是空气。
+     */
+    const char *wsdir = make_ws_dir();
+    CA_ASSERT(wsdir != NULL);
+    if (wsdir == NULL) return;
+    char link_path[3072];
+    int n = snprintf(link_path, sizeof(link_path), "%s%ccagent_test_symlink",
+                     wsdir, CA_TEST_SEP);
     CA_ASSERT(n > 0 && (size_t)n < sizeof(link_path)); /* 截断即视为失败 */
     if (n <= 0 || (size_t)n >= sizeof(link_path)) return;
     unlink(link_path);
@@ -186,9 +196,10 @@ CA_TEST(path_rejects_symlink_escape) {
 
     ca_workspace *ws = make_ws();
     CA_ASSERT(ws != NULL);
+    if (ws == NULL) { unlink(link_path); return; }
     char out[2048];
     size_t need = 0;
-    /* 词法上完全在工作区内，但经符号链接指向 /etc —— 必须拒绝 */
+    /* 符号链接完全在工作区内部，仅测 ../ 是测不出它的。契约 P4 明确要求覆盖 */
     int rc = ca_ws_resolve(ws, "cagent_test_symlink/passwd", out, sizeof(out), &need);
     unlink(link_path);
     CA_ASSERT(rc == -1);
