@@ -54,15 +54,25 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          set -e
+          set -uo pipefail
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+            if ! sudo apt-get update -qq > curlsetup.log 2>&1 \
+               || ! sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev >> curlsetup.log 2>&1; then
+              echo "::error title=libcurl 安装失败::$(tail -c 1200 curlsetup.log | tr '\n' ' ')"
+              cat curlsetup.log
+              exit 1
+            fi
           else
-            brew list curl >/dev/null 2>&1 || brew install curl
+            if ! brew list curl >/dev/null 2>&1; then
+              if ! brew install curl > curlsetup.log 2>&1; then
+                echo "::error title=brew install curl 失败::$(tail -c 1200 curlsetup.log | tr '\n' ' ')"
+                cat curlsetup.log
+                exit 1
+              fi
+            fi
             echo "CURL_PREFIX=$(brew --prefix curl)" >> "$GITHUB_ENV"
           fi
-          curl-config --version
+          curl-config --version || echo "::warning::无 curl-config，find_package(CURL) 可能失败"
 
       - name: 准备 libcurl（Windows）
         if: runner.os == 'Windows'
@@ -79,12 +89,24 @@ jobs:
           #  2. GITHUB_ENV 只接受 `KEY=value`，却写成了 `KEY: value`，
           #     于是运行器在**第一步**就报 `Invalid format` 直接崩掉。
           # 正确做法：直接在 shell 里读，用 `=` 分隔。
+          #
+          # 注意不要写 `set -e`：那样 `vcpkg: command not found` 这类失败
+          # 会以 127 静默退出，任何注解都不会有——正是本工作流最初的状态。
           if [ -z "${VCPKG_INSTALLATION_ROOT:-}" ]; then
-            echo "::error::未找到 vcpkg，Windows 腿只能构建内存后端"
+            echo "::error::未找到 vcpkg（VCPKG_INSTALLATION_ROOT 为空）"
+            exit 1
+          fi
+          if ! command -v vcpkg >/dev/null 2>&1; then
+            echo "::error::vcpkg 不在 PATH 上（VCPKG_INSTALLATION_ROOT=$VCPKG_INSTALLATION_ROOT）"
             exit 1
           fi
           echo "VCPKG_INSTALLATION_ROOT=${VCPKG_INSTALLATION_ROOT}" >> "$GITHUB_ENV"
-          vcpkg install curl:x64-windows-static-md
+          if ! vcpkg install curl:x64-windows-static-md > vcpkg.log 2>&1; then
+            echo "::error title=vcpkg install curl 失败::$(tail -c 1200 vcpkg.log | tr '\n' ' ')"
+            cat vcpkg.log
+            exit 1
+          fi
+          tail -3 vcpkg.log
           echo "VCPKG_INSTALLED_DIR=${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static-md" >> "$GITHUB_ENV"
           echo "vcpkg 就绪: ${VCPKG_INSTALLATION_ROOT}"
 
@@ -169,7 +191,7 @@ jobs:
       - name: 独立复核内存承诺
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # 脚本就在 product/scripts/，而本 job 的工作目录已经是 product ——
           # 早先写 ../scripts/verify_memory.py 必然找不到文件。
           # 可执行文件路径也不同：MSVC 多配置生成器放 build/Release/，
@@ -184,7 +206,12 @@ jobs:
             exit 1
           fi
           echo "探针: $EXE"
-          python scripts/verify_memory.py --exe "$EXE" --budget-mb 8
+          if ! python scripts/verify_memory.py --exe "$EXE" --budget-mb 8 > mem.log 2>&1; then
+            echo "::error title=内存承诺未达成::$(tail -c 1200 mem.log | tr '\n' ' ')"
+            cat mem.log
+            exit 1
+          fi
+          cat mem.log
 
       - name: 工具链指纹（失败时也打印）
         if: always()
