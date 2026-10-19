@@ -157,29 +157,50 @@ CA_TEST(json_rejects_malformed_input_without_crashing) {
 }
 
 CA_TEST(json_is_allocation_free) {
-    /* 契约 C6：JSON 解析不得随输入增长分配内存。
-     * 这里用一个很大的 JSON 文档验证：RSS 增量必须极小。 */
-    size_t n = 4u * 1024u * 1024u;
+    /* 契约 C6：JSON 解析全程零分配。
+     *
+     * 早先这里分配 4 MB，目标缓冲是裸的 `char buf[64]`。
+     * 解析器一旦越界，Windows 报 SEGFAULT、macOS 报 Bus error——
+     * **崩溃点与出错点无关**，定位成本极高。
+     *
+     * 改成：目标缓冲两侧加哨兵，越界会破坏哨兵 → 变成**明确的断言失败**。
+     * 尺寸同时收窄到 256 KB：溢出的**判定逻辑**与字段大小无关，
+     * 却省掉了大块分配带来的信号。
+     */
+    size_t n = 256u * 1024u;
     char *big = (char *)malloc(n + 64);
     CA_ASSERT(big != NULL);
     if (big == NULL) return;
-    /* 造一个 "{\"padding\":\"aaaa...\",\"n\":1}" */
+    /* 一段 JSON 文档 "{\"padding\":\"aaaa...\",\"n\":1}" */
     size_t p = 0;
     memcpy(big + p, "{\"padding\":\"", 13); p += 13;
     memset(big + p, 'a', n); p += n;
     memcpy(big + p, "\",\"n\":1}", 8); p += 8;
 
-    char buf[64];
+    unsigned char canary[64];
+    memset(canary, 0x5A, sizeof(canary));
+
+    char guarded[64 + 64 + 64]; /* pad | buf | pad2 */
+    memset(guarded, 0x5A, sizeof(guarded)); /* 整块先填哨兵值 */
+    char *buf = guarded + 64;
+
     ca_json_cursor root, v;
     ca_json_init(&root, big, p);
     CA_ASSERT(ca_json_enter_object(&root) == 0);
     CA_ASSERT(ca_json_field(&root, "padding", &v) == 1);
-    /* 读入定长缓冲必然装不下 —— 关键是**报错**而不是分配或截断 */
-    CA_ASSERT(ca_json_read_string(&v, buf, sizeof(buf), NULL) == -2);
+    /* 溢出超长字段时直接拒绝，而不是**悄悄截断**——这是被测的关键性质 */
+    CA_ASSERT(ca_json_read_string(&v, buf, 64, NULL) == -2);
+    /* 前置：一旦破坏就是越界写 */
+    CA_ASSERT_EQ_INT(memcmp(guarded, canary, 64), 0);
+    /* 后置：同上 */
+    CA_ASSERT_EQ_INT(memcmp(guarded + 128, canary, 64), 0);
+
     CA_ASSERT(ca_json_field(&root, "n", &v) == 1);
     long long num = 0;
     CA_ASSERT(ca_json_read_int(&v, &num) == 0);
     CA_ASSERT_EQ_INT(num, 1);
+    CA_ASSERT_EQ_INT(memcmp(guarded, canary, 64), 0);
+    CA_ASSERT_EQ_INT(memcmp(guarded + 128, canary, 64), 0);
     free(big);
 }
 

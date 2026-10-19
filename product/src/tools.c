@@ -20,6 +20,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#  include <limits.h>
+/* realpath() 的目标缓冲区必须至少是 PATH_MAX。
+ * POSIX 规定得很明确，而 realpath **不知道你给的缓冲区有多大**，
+ * 它会一路写到解析结果的末尾。早先三处都传 CA_PATH_MAX(1024)，
+ * 任何超过 1024 的路径都会越界写栈——在 Ubuntu 上表现为
+ * tools_test 直接 abort，而崩溃点离真正的错误点很远。
+ *
+ * 不能用 realpath(path, NULL)（GNU 扩展会自动分配）：
+ * macOS 不支持，而 macOS 恰恰是最需要这个修复的平台。 */
+#  ifndef CA_POSIX_PATH_MAX
+#    ifdef PATH_MAX
+#      define CA_POSIX_PATH_MAX PATH_MAX
+#    else
+#      define CA_POSIX_PATH_MAX 4096
+#    endif
+#  endif
+#endif
 
 #include "cagent/json.h"
 
@@ -284,7 +302,7 @@ ca_workspace *ca_ws_open(const char *root) {
      * Windows 上 GetFullPathName 已经做了等价的事，不需要额外处理。
      * realpath 失败（目录还不存在）时保留词法结果，属可接受的降级。
      */
-    char real_root[CA_PATH_MAX];
+    char real_root[CA_POSIX_PATH_MAX];
     if (realpath(ws->root, real_root) != NULL) {
         size_t rn = strlen(real_root);
         while (rn > 1 && (real_root[rn - 1] == '/' || real_root[rn - 1] == '\\')) {
@@ -321,13 +339,15 @@ static int is_within(const char *root, const char *p) {
 /* 取最深的已存在祖先做 realpath，消解符号链接后再判包含性。
  * 只做词法检查是不够的：工作区内一个指向外部的符号链接是最常见的逃逸方式。 */
 static int realpath_ancestor(const char *path, char *out, size_t cap) {
-    char tmp[CA_PATH_MAX];
+    /* 两个缓冲都必须是 CA_POSIX_PATH_MAX：realpath 不知道它们的容量。
+     * 早先这里用 CA_PATH_MAX(1024)，超过 1024 的路径就越界写栈。 */
+    char tmp[CA_POSIX_PATH_MAX];
     if (strlen(path) >= sizeof(tmp)) return -1;
     ca_copy_str(tmp, sizeof(tmp), path);
 
     /* 逐级去掉末尾分量直到某一级存在 */
     for (;;) {
-        char resolved[CA_PATH_MAX];
+        char resolved[CA_POSIX_PATH_MAX];
         if (realpath(tmp, resolved) != NULL) {
             if (strlen(resolved) >= cap) return -1;
 ca_copy_str(out, cap, resolved);
@@ -379,7 +399,7 @@ int ca_ws_resolve(ca_workspace *ws, const char *input, char *out, size_t cap,
 #if !defined(_WIN32)
     /* 第二次检查：消解符号链接后再判。
      * 存在的文件直接判；不存在的（写入前）判其最深的已存在祖先。 */
-    char real[CA_PATH_MAX];
+    char real[CA_POSIX_PATH_MAX];
     if (realpath(norm, real) != NULL) {
         if (!is_within(ws->root, real)) {
             if (need_len != NULL) *need_len = strlen(real) + 1;
