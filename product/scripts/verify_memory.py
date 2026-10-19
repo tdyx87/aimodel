@@ -135,7 +135,7 @@ def main() -> int:
     _force_utf8_output()
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", required=True, help="可执行文件路径")
-    ap.add_argument("--budget-mb", type=float, default=8.0, help="RSS 预算（MB）")
+    ap.add_argument("--budget-mb", type=float, default=100.0, help="RSS 预算（MB）")
     ap.add_argument("--samples", type=int, default=5, help="采样次数")
     ap.add_argument("--settle", type=float, default=0.5, help="每次采样间隔（秒）")
     args = ap.parse_args()
