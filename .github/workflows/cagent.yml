@@ -87,19 +87,29 @@ jobs:
       - name: 构建（零告警为硬要求）
         shell: bash
         run: |
-          set -e
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          # 用 toolchain file 让 Windows 上的 vcpkg 被自动发现
-          if [ "$RUNNER_OS" = "Windows" ] && [ -n "$VCPKG_INSTALLED_DIR" ]; then
-            echo "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" >> "$CMAKE_ARGS"
+          set -euo pipefail
+          # $VCPKG_ROOT **只在 Windows 上存在**。早先无条件传
+          #   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/.../vcpkg.cmake"
+          # 在 Linux/macOS 上展开成 /scripts/buildsystems/vcpkg.cmake，
+          # 一个不存在的路径，CMake 必然报错。
+          # 真正致命的是配上 `2>/dev/null || true` —— 报错被整条吞掉，
+          # 后续步骤继续在损坏的缓存上跑，而日志里什么都看不到。
+          # 这个工作流**从来没有一次是绿的**，原因就在这里。
+          CA_CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=Release)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            CA_CMAKE_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake")
           fi
-          cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" 2>/dev/null || true
-          # 关键：把告警当错误。MSVC 的 LNK4044 曾长期存在却被
-          # 一个不匹配的 grep 过滤掉，直到 CI 上另一个平台报错才暴露。
+          # 刻意不叫 CMAKE_ARGS：那是 GitHub Actions 自己的环境变量。
+          cmake -S . -B build "${CA_CMAKE_ARGS[@]}"
+          # pipefail：没有它，`cmake --build | tee` 会把构建失败吞成 0
           cmake --build build --config Release 2>&1 | tee build.log
-          if grep -qiE "warning [A-Z]+[0-9]+" build.log; then
+          # 两种工具链的告警格式都要覆盖：
+          #   MSVC   -> `warning C4996`
+          #   GCC    -> `warning:`（后面跟文字，不是字母数字）
+          # 早先只匹配前一种，等于 Linux 上的告警全部漏检。
+          if grep -qE "warning [A-Z]+[0-9]+|warning:" build.log; then
             echo "::error::构建产生告警，按门禁要求拒绝"
-            grep -iE "warning [A-Z]+[0-9]+" build.log | head -20
+            grep -E "warning [A-Z]+[0-9]+|warning:" build.log | head -20
             exit 1
           fi
           echo "编译零告警 ✓"
@@ -123,7 +133,23 @@ jobs:
       # 内置的内存查询服务于用户，验收脚本服务于门禁，两者不能是同一个东西。
       - name: 独立复核内存承诺
         shell: bash
-        run: python ../scripts/verify_memory.py --exe build/Release --budget-mb 8
+        run: |
+          set -euo pipefail
+          # 脚本就在 product/scripts/，而本 job 的工作目录已经是 product ——
+          # 早先写 ../scripts/verify_memory.py 必然找不到文件。
+          # 可执行文件路径也不同：MSVC 多配置生成器放 build/Release/，
+          # 单配置生成器直接放 build/。写死任一路径 = 只在一个平台上能跑。
+          EXE=""
+          for cand in build/Release/mem_probe.exe build/mem_probe.exe build/mem_probe; do
+            if [ -f "$cand" ]; then EXE="$cand"; break; fi
+          done
+          if [ -z "$EXE" ]; then
+            echo "::error::找不到 mem_probe，无法复核内存承诺"
+            find build -name 'mem_probe*' -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "探针: $EXE"
+          python scripts/verify_memory.py --exe "$EXE" --budget-mb 8
 
       - name: 工具链指纹（失败时也打印）
         if: always()
