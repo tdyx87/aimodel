@@ -29,8 +29,24 @@ CA_TEST(rss_is_readable_and_plausible) {
 CA_TEST(peak_rss_not_less_than_current) {
     int64_t cur = ca_rss_bytes();
     int64_t peak = ca_peak_rss_bytes();
-    if (cur < 0 || peak < 0) return; /* 平台不支持，跳过 */
-    CA_ASSERT(peak >= cur);
+    if (cur < 0 || peak < 0) return; /* 平台不支持，忽略 */
+    /* 不变量 `peak >= cur` 由**操作系统**保证，不由本项目保证。
+     *
+     * Linux 的 hiwater_rss 是**延迟更新**的：内核只在缺页、退出等时机
+     * 刷新它。刚涨上去的当前 RSS 可以暂时高于记录中的峰值 ——
+     * 在 GitHub Actions runner 上实测复现过（peak < cur）。
+     *
+     * 早先这里是裸断言，于是 CI 偶发红，而它跟被测代码的��错无关。
+     * 改成「峰值应在当前值的量级内」，测的是本项目真正依赖的性质：
+     * 两个接口都给出了可用的、正的、同一量级的数值。
+     */
+    if (peak < cur) {
+        /* 允许延迟记账造成的偏差，但仍要挡住「接口返回了垃圾值」 */
+        CA_ASSERT(cur - peak <= (int64_t)4 * 1024 * 1024);
+        printf("    (平台记账延迟: peak < cur，偏差 %lld 字节，在容忍范围内)\n",
+               (long long)(cur - peak));
+    }
+    CA_ASSERT(peak > 0);
 }
 
 CA_TEST(rss_over_respects_limit) {

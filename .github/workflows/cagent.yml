@@ -239,7 +239,7 @@ jobs:
           if [ $code -ne 0 ]; then
             # 注解携带**实际内容**（步骤摘要在网页端要登录才看得到，
             # 而公开 API 能读到注解）——这两条通道互补，少一条都可能瞎。
-            echo "::error title=单元测试失败::$(grep -E 'FAIL|tests failed|断言|Error|error' ctest.log | head -6 | tr '\n' ' ')"
+            echo "::error title=单元测试失败::$(grep -A6 'The following tests FAILED' ctest.log | tr '\n' ' ')$(grep -E '\[FAIL\]|Bus error|Exception|断言' ctest.log | head -8 | tr -d '\r' | tr '\n' ' ')"
             {
               echo "### ❌ 单元测试失败 (ctest 退出码 $code)"
               echo '```'; tail -c 4000 ctest.log; echo '```'

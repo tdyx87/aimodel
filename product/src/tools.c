@@ -271,6 +271,28 @@ ca_workspace *ca_ws_open(const char *root) {
     while (n > 1 && (ws->root[n - 1] == '/' || ws->root[n - 1] == '\\')) {
         ws->root[--n] = '\0';
     }
+
+#if !defined(_WIN32)
+    /* 关键：root 必须自己也规范化（消解符号链接），否则沙箱形同虚设。
+     *
+     * macOS 上 /tmp 是指向 /private/tmp 的**符号链接**。于是：
+     *     ws->root            = /tmp/cagent_tools_test      （词法规范化的结果）
+     *     realpath(候选路径)  = /private/tmp/cagent_tools_test/...
+     * is_within(ws->root, real) 永远为假 —— 于是 POSIX 上**每一次**
+     * 路径解析都被判成「逃出工作区」，工具层在该平台上直接不可用。
+     *
+     * Windows 上 GetFullPathName 已经做了等价的事，不需要额外处理。
+     * realpath 失败（目录还不存在）时保留词法结果，属可接受的降级。
+     */
+    char real_root[CA_PATH_MAX];
+    if (realpath(ws->root, real_root) != NULL) {
+        size_t rn = strlen(real_root);
+        while (rn > 1 && (real_root[rn - 1] == '/' || real_root[rn - 1] == '\\')) {
+            real_root[--rn] = '\0';
+        }
+        if (rn < sizeof(ws->root)) ca_copy_str(ws->root, sizeof(ws->root), real_root);
+    }
+#endif
     return ws;
 }
 
