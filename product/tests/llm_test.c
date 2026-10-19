@@ -18,10 +18,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 尾部字面量 ""}}]}}]}" 共 7 字节，加结尾 NUL = 8。
- * 必须是**编译期常量**：写成运行期变量后 GCC 无法常量传播，
- * -Wformat-truncation 会误判成"输出被截断"。 */
-#define LLM_TAIL_BYTES 8
+/* 载荷尾部的固定字面量。
+ * 刻意用 memcpy 而不是 snprintf：这里的尺寸关系在编译期就能判定，
+ * 而 snprintf 在 FORTIFY 下会走 __snprintf_chk 的静态分析，
+ * 对「运行期 malloc + 编译期常量上界」这种组合它判不准，
+ * 反复报 output truncated before the last format character。 */
+static const char k_llm_tail[] = "\"}}]}}]}";
 
 typedef struct {
     int texts;
@@ -220,16 +222,16 @@ CA_TEST(llm_accepts_large_single_argument_fragment) {
                       "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
     CA_ASSERT(hn > 0 && (size_t)hn < sizeof(head));
     if (hn <= 0 || (size_t)hn >= sizeof(head)) return;
-    const size_t tail = LLM_TAIL_BYTES; /* "\"}}]}}]}" 加结尾 NUL */
-    char *payload = (char *)malloc((size_t)hn + big_len + tail);
+    char *payload = (char *)malloc((size_t)hn + big_len + sizeof(k_llm_tail));
     CA_ASSERT(payload != NULL);
     if (payload == NULL) return;
     memcpy(payload, head, (size_t)hn);
     size_t at = (size_t)hn;
     for (size_t i = 0; i < big_len; i++) payload[at + i] = 'x';
     at += big_len;
-    int tn = snprintf(payload + at, LLM_TAIL_BYTES, "\"}}]}}]}");
-    int rc = ca_llm_on_frame(llm, payload, at + (size_t)tn, on_ev, &r);
+    memcpy(payload + at, k_llm_tail, sizeof(k_llm_tail));
+    at += sizeof(k_llm_tail) - 1;
+    int rc = ca_llm_on_frame(llm, payload, at, on_ev, &r);
     CA_ASSERT_EQ_INT(rc, 0);
     size_t got = 0;
     int ov = 0;
@@ -254,16 +256,16 @@ CA_TEST(llm_marks_argument_overflow_without_truncating) {
                       "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
     CA_ASSERT(hn > 0 && (size_t)hn < sizeof(head));
     if (hn <= 0 || (size_t)hn >= sizeof(head)) return;
-    const size_t tail = LLM_TAIL_BYTES;
-    char *payload = (char *)malloc((size_t)hn + huge + tail);
+    char *payload = (char *)malloc((size_t)hn + huge + sizeof(k_llm_tail));
     CA_ASSERT(payload != NULL);
     if (payload == NULL) return;
     memcpy(payload, head, (size_t)hn);
     size_t at = (size_t)hn;
     for (size_t i = 0; i < huge; i++) payload[at + i] = 'x';
     at += huge;
-    int tn = snprintf(payload + at, LLM_TAIL_BYTES, "\"}}]}}]}");
-    (void)ca_llm_on_frame(llm, payload, at + (size_t)tn, on_ev, &r);
+    memcpy(payload + at, k_llm_tail, sizeof(k_llm_tail));
+    at += sizeof(k_llm_tail) - 1;
+    (void)ca_llm_on_frame(llm, payload, at, on_ev, &r);
 
     size_t got = 0;
     int ov = 1;

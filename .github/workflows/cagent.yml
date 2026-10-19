@@ -54,6 +54,12 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          # GitHub 对 shell: bash 的默认调用是
+          #     bash --noprofile --norc -eo pipefail {0}
+          # **它自己就带 -e**。在脚本里写 \set -uo pipefail\ 只能追加、关不掉，
+          # 于是任何失败都会在诊断语句之前把脚本掐死——症状是「步骤退出码
+          # 原样等于失败命令的退出码，且一条注解都没有」。必须显式 set +e。
+          set +e
           set -uo pipefail
           if [ "$RUNNER_OS" = "Linux" ]; then
             if ! sudo apt-get update -qq > curlsetup.log 2>&1 \
@@ -78,6 +84,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          # GitHub 对 shell: bash 的默认调用是
+          #     bash --noprofile --norc -eo pipefail {0}
+          # **它自己就带 -e**。在脚本里写 \set -uo pipefail\ 只能追加、关不掉，
+          # 于是任何失败都会在诊断语句之前把脚本掐死——症状是「步骤退出码
+          # 原样等于失败命令的退出码，且一条注解都没有」。必须显式 set +e。
+          set +e
           set -uo pipefail
           # 运行器自带 curl.exe，但通常**没有 MSVC 导入库**。vcpkg 提供与
           # 工具链匹配的二进制，避免从源码构建（那会拖垮 CI 时间）。
@@ -122,6 +134,12 @@ jobs:
           # 终止脚本，下面精心准备的诊断（注解 + 步骤摘要）一行都来不及输出。
           # 本工作流曾因此表现为「失败了但什么信息都没有」——
           # 排查者只知道红了，连哪一步、为什么都看不到。
+          # GitHub 对 shell: bash 的默认调用是
+          #     bash --noprofile --norc -eo pipefail {0}
+          # **它自己就带 -e**。在脚本里写 \set -uo pipefail\ 只能追加、关不掉，
+          # 于是任何失败都会在诊断语句之前把脚本掐死——症状是「步骤退出码
+          # 原样等于失败命令的退出码，且一条注解都没有」。必须显式 set +e。
+          set +e
           set -uo pipefail
           # $VCPKG_ROOT **只在 Windows 上存在**。早先无条件传
           #   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/.../vcpkg.cmake"
@@ -208,6 +226,12 @@ jobs:
         run: |
           # 同样**不用 set -e**：否则 ctest 的退出码 8（有测试失败）
           # 会直接冒泡成步骤退出码，诊断语句一行都不执行。
+          # GitHub 对 shell: bash 的默认调用是
+          #     bash --noprofile --norc -eo pipefail {0}
+          # **它自己就带 -e**。在脚本里写 \set -uo pipefail\ 只能追加、关不掉，
+          # 于是任何失败都会在诊断语句之前把脚本掐死——症状是「步骤退出码
+          # 原样等于失败命令的退出码，且一条注解都没有」。必须显式 set +e。
+          set +e
           set -uo pipefail
           ctest --test-dir build -C Release --output-on-failure > ctest.log 2>&1
           code=$?
@@ -228,6 +252,12 @@ jobs:
       - name: 独立复核内存承诺
         shell: bash
         run: |
+          # GitHub 对 shell: bash 的默认调用是
+          #     bash --noprofile --norc -eo pipefail {0}
+          # **它自己就带 -e**。在脚本里写 \set -uo pipefail\ 只能追加、关不掉，
+          # 于是任何失败都会在诊断语句之前把脚本掐死——症状是「步骤退出码
+          # 原样等于失败命令的退出码，且一条注解都没有」。必须显式 set +e。
+          set +e
           set -uo pipefail
           # 脚本就在 product/scripts/，而本 job 的工作目录已经是 product ——
           # 早先写 ../scripts/verify_memory.py 必然找不到文件。
