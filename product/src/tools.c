@@ -141,6 +141,13 @@ static int ca_is_absolute(const char *p) {
 #else
 #  define CA_SEP '/'
 static int ca_is_sep(char c) { return c == '/'; }
+/* 这一个函数早先只在 Windows 分支里有定义，POSIX 分支漏了 ——
+ * 而它是被**无条件调用**的。结果是整个 POSIX 侧从未编译成功过：
+ * macOS 报 "call to undeclared function"，Linux 报 "undefined reference"。
+ * 本地只有 MSVC，这个洞一直看不见。 */
+static int ca_is_absolute(const char *p) {
+    return p != NULL && p[0] == '/';
+}
 #endif
 
 /* 词法规范化：消解 '.' 与 '..'，不访问文件系统。

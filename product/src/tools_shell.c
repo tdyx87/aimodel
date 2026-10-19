@@ -21,6 +21,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* S_ISDIR / S_ISREG 来自这里。没包含就直接用，在 glibc 下编译期无警告、
+ * 链接期才炸（undefined reference）——一个只在非 Windows 平台才暴露的洞。 */
+#if !defined(_WIN32)
+#  include <sys/stat.h>
+#  include <sys/types.h>
+#  include <dirent.h>
+#endif
+
 #include "cagent/json.h"
 
 #if defined(_WIN32)

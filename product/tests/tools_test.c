@@ -154,10 +154,15 @@ CA_TEST(path_rejects_absolute_outside_on_relative_root) {
 CA_TEST(path_rejects_symlink_escape) {
     /* 工作区内一个指向外部的符号链接 —— 最常见的逃逸方式，
      * 只测 ../ 是测不出它的。契约 P4 明确要求覆盖。 */
-    char link_path[2048];
+    char link_path[3072]; /* 比 cwd 大：GCC 的 -Wformat-truncation 指出
+                           * 2048 装不下「cwd(2048) + 后缀」，会静默截断。
+                           * 截断后的路径会让这个用例测不到它想测的东西，
+                           * 却照样显示「通过」。 */
     char cwd[2048];
     CA_ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
-    snprintf(link_path, sizeof(link_path), "%s/cagent_test_symlink", cwd);
+    int n = snprintf(link_path, sizeof(link_path), "%s/cagent_test_symlink", cwd);
+    CA_ASSERT(n > 0 && (size_t)n < sizeof(link_path)); /* 截断即视为失败 */
+    if (n <= 0 || (size_t)n >= sizeof(link_path)) return;
     unlink(link_path);
     if (symlink("/etc", link_path) != 0) {
         printf("    无法创建符号链接，跳过（本环境不允许）\n");
