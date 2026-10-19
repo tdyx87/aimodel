@@ -18,6 +18,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 尾部字面量 ""}}]}}]}" 共 7 字节，加结尾 NUL = 8。
+ * 必须是**编译期常量**：写成运行期变量后 GCC 无法常量传播，
+ * -Wformat-truncation 会误判成"输出被截断"。 */
+#define LLM_TAIL_BYTES 8
+
 typedef struct {
     int texts;
     int begins;
@@ -215,7 +220,7 @@ CA_TEST(llm_accepts_large_single_argument_fragment) {
                       "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
     CA_ASSERT(hn > 0 && (size_t)hn < sizeof(head));
     if (hn <= 0 || (size_t)hn >= sizeof(head)) return;
-    size_t tail = 8; /* "\"}}]}}]}" 加结尾 NUL */
+    const size_t tail = LLM_TAIL_BYTES; /* "\"}}]}}]}" 加结尾 NUL */
     char *payload = (char *)malloc((size_t)hn + big_len + tail);
     CA_ASSERT(payload != NULL);
     if (payload == NULL) return;
@@ -223,7 +228,7 @@ CA_TEST(llm_accepts_large_single_argument_fragment) {
     size_t at = (size_t)hn;
     for (size_t i = 0; i < big_len; i++) payload[at + i] = 'x';
     at += big_len;
-    int tn = snprintf(payload + at, tail, "\"}}]}}]}");
+    int tn = snprintf(payload + at, LLM_TAIL_BYTES, "\"}}]}}]}");
     int rc = ca_llm_on_frame(llm, payload, at + (size_t)tn, on_ev, &r);
     CA_ASSERT_EQ_INT(rc, 0);
     size_t got = 0;
@@ -249,7 +254,7 @@ CA_TEST(llm_marks_argument_overflow_without_truncating) {
                       "\"id\":\"c\",\"function\":{\"name\":\"read_file\",\"arguments\":\"");
     CA_ASSERT(hn > 0 && (size_t)hn < sizeof(head));
     if (hn <= 0 || (size_t)hn >= sizeof(head)) return;
-    size_t tail = 8;
+    const size_t tail = LLM_TAIL_BYTES;
     char *payload = (char *)malloc((size_t)hn + huge + tail);
     CA_ASSERT(payload != NULL);
     if (payload == NULL) return;
@@ -257,7 +262,7 @@ CA_TEST(llm_marks_argument_overflow_without_truncating) {
     size_t at = (size_t)hn;
     for (size_t i = 0; i < huge; i++) payload[at + i] = 'x';
     at += huge;
-    int tn = snprintf(payload + at, tail, "\"}}]}}]}");
+    int tn = snprintf(payload + at, LLM_TAIL_BYTES, "\"}}]}}]}");
     (void)ca_llm_on_frame(llm, payload, at + (size_t)tn, on_ev, &r);
 
     size_t got = 0;

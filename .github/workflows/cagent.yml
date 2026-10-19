@@ -135,17 +135,22 @@ jobs:
           # 失败原因写进 **注解** 而不是只留在 job 日志里：
           # 注解能被公开 API 读到，日志不能（要鉴权）。排查时这一点很关键——
           # 早先的失败日志谁也看不到，于是「它一直在红」这件事长期无人知晓。
+          # 失败详情同时写进 **步骤摘要**（$GITHUB_STEP_SUMMARY）。
+          # `::error::` 注解会被命令解析器吞掉（本工作流已经吃过两次亏），
+          # 而步骤摘要在网页端直接可见、不需要任何鉴权 —— 排查时最可靠。
+          dump() {  # $1=标题 $2=日志文件
+            echo "### ❌ $1" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -c 4000 "$2" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=$1::见本步骤摘要"
+          }
           if ! cmake -S . -B build "${CA_CMAKE_ARGS[@]}" > cfg.log 2>&1; then
-            echo "::error title=CMake 配置失败::$(tail -c 1800 cfg.log | tr '\n' ' ')"
-            cat cfg.log
-            exit 1
+            dump "CMake 配置失败" cfg.log; cat cfg.log; exit 1
           fi
           cat cfg.log
-          # pipefail：没有它，`cmake --build | tee` 会把构建失败吞成 0
           if ! cmake --build build --config Release > build.log 2>&1; then
-            echo "::error title=构建失败::$(tail -c 1800 build.log | tr '\n' ' ')"
-            cat build.log
-            exit 1
+            dump "构建失败" build.log; cat build.log; exit 1
           fi
           cat build.log
           # 两种工具链的告警格式都要覆盖：
@@ -157,8 +162,12 @@ jobs:
           # 日志要鉴权读不到，注解能。结果就是「谁也看不出哪里在告警」，
           # 于是告警门禁只会显示一句红字。
           if grep -qE "warning [A-Z]+[0-9]+|warning:" build.log; then
-            echo "::error title=构建产生告警::$(grep -E 'warning [A-Z]+[0-9]+|warning:' build.log | head -8 | tr '\n' ' ')"
-            grep -E "warning [A-Z]+[0-9]+|warning:" build.log | head -20
+            {
+              echo "### ❌ 构建产生告警"
+              echo '```'; grep -E "warning [A-Z]+[0-9]+|warning:" build.log | head -20
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::构建产生告警，见步骤摘要"
             exit 1
           fi
           echo "编译零告警 ✓"
@@ -182,7 +191,12 @@ jobs:
           code=$?
           tail -60 ctest.log
           if [ $code -ne 0 ]; then
-            echo "::error title=单元测试失败::$(grep -E 'FAIL|断言|tests failed' ctest.log | head -6 | tr '\n' ' ')"
+            {
+              echo "### ❌ 单元测试失败 (ctest 退出码 $code)"
+              echo '```'; tail -c 4000 ctest.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::单元测试失败，见步骤摘要"
+            tail -40 ctest.log
             exit 1
           fi
 
