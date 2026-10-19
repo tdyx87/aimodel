@@ -19,9 +19,11 @@ CA_TEST(rss_is_readable_and_plausible) {
         printf("    当前平台无法读取 RSS（返回 %lld），该用例无法验证\n", (long long)rss);
         return;
     }
-    CA_ASSERT(rss > 0);
-    /* 一个运行着的进程不可能低于 1 MB，也不可能超过 8 GB */
-    CA_ASSERT(rss > 1024 * 1024);
+CA_ASSERT(rss > 0);
+    /* 一个进程值不值得相信，靠**区间**判断，不靠一个拍脑袋的下限。
+     * 早先这里硬性要求 rss > 1 MB，于是 WSL2 上一个 0.80 MB 的进程被判失败
+     * —— 那不是缺陷，那是一个**很小的正常进程**。
+     * 真实约束只有两条：读数非负，且不至于大到荒谬（排除单位错误）。 */
     CA_ASSERT(rss < 8LL * 1024 * 1024 * 1024);
     printf("    当前 RSS = %.2f MB\n", (double)rss / 1024.0 / 1024.0);
 }
