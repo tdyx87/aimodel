@@ -233,7 +233,11 @@ jobs:
           # 原样等于失败命令的退出码，且一条注解都没有」。必须显式 set +e。
           set +e
           set -uo pipefail
-          ctest --test-dir build -C Release --output-on-failure > ctest.log 2>&1
+          # -V（verbose）而不是只 --output-on-failure：
+          # 段错误/总线错误时，ctest 可能丢掉该用例的**部分**输出，
+          # 于是日志里只剩一行 Exception，连「崩在哪个用例」都看不到。
+          # -V 是流式的，崩溃前的 [ RUN ] 行一定留得住。
+          ctest --test-dir build -C Release -V > ctest.log 2>&1
           code=$?
           tail -60 ctest.log
           if [ $code -ne 0 ]; then
