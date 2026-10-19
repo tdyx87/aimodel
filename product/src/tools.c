@@ -381,6 +381,15 @@ ca_copy_str(out, cap, norm);
     return 0;
 }
 
+const char *ca_tool_pending_display(const ca_tool_ctx *ctx, const char *tool_name) {
+    if (ctx == NULL || ctx->pending_display == NULL) return NULL;
+    if (tool_name != NULL && strcmp(tool_name, "run_shell") != 0 &&
+        strcmp(tool_name, "write_file") != 0) {
+        return NULL;
+    }
+    return ctx->pending_display;
+}
+
 /* ============================================================ 工具 */
 
 /* 从参数 JSON 里取字符串字段。找不到时 out 置空。 */

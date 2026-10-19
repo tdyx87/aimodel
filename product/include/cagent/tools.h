@@ -86,7 +86,23 @@ typedef struct {
     ca_workspace *ws;
     ca_perm_cb perm;
     void *perm_user;
+    /* 破坏性工具**待展示内容**：在调用工具之前填好，供权限界面展示。
+     * P5 要求命令原文完整呈现、不得折叠——由工具层准备原始文本，
+     * 避免权限层重复解析参数（那样可能解析出与实际执行不同的东西）。 */
+    const char *pending_display;
 } ca_tool_ctx;
+
+/* 取得某个破坏性工具**待展示给用户的内容**。
+ *
+ * 契约 P2/P5：批准前必须看到「完整参数」与「命令原文」。
+ * 这里单独提供查询，而不是让权限回调自己去解析参数——
+ * 权限层不该重复解析一遍，更不该可能解析出与实际执行不同的东西。
+ */
+const char *ca_tool_pending_display(const ca_tool_ctx *ctx, const char *tool_name);
+
+/* 取得某个破坏性工具待展示给用户的内容（契约 P2/P5）。
+ * 返回 NULL 表示当前没有待批准的操作。 */
+const char *ca_tool_pending_display(const ca_tool_ctx *ctx, const char *tool_name);
 
 /* 工具返回码。区分「用户拒绝」与「执行失败」很重要：
  * 前者要让模型知道可以换个做法继续，后者是技术故障。 */
@@ -112,6 +128,39 @@ ca_tool_status ca_tool_write_file(ca_tool_ctx *ctx, const char *args_json);
 
 /* 列目录。args_json 形如 {"path":"src"} */
 ca_tool_status ca_tool_list_dir(ca_tool_ctx *ctx, const char *args_json);
+
+/* ---- search ----
+ *
+ * 只做**字面**搜索，不做正则：引入正则引擎意味着引入一套自己的
+ * 回溯/灾难性匹配保护逻辑，而那与「极低内存、行为可预测」的目标相悖。
+ * 正则搜索留给后续议题，届时按 ADR 走（契约 §5.1 原写的是「字面/正则」，
+ * 本轮只交付字面部分，如实标注）。
+ *
+ * 结果按文件分组、带行号，且必须有截断标注——与 read_file 同理。
+ */
+typedef struct {
+    const char *pattern;      /* 字面串，必需 */
+    const char *glob;         /* 文件名子串过滤，可为 NULL */
+    int max_results;          /* <=0 用默认 200 */
+} ca_search_opts;
+
+ca_tool_status ca_tool_search(ca_tool_ctx *ctx, const ca_search_opts *opts);
+
+/* ---- run_shell ----
+ *
+ * P5：命令原文必须**完整**展示给用户，不得折叠或省略——
+ * 用户批准前必须看清到底要执行什么。折叠命令等于让用户盲批。
+ *
+ * 输出有上限（CA_TOOL_RESULT_LIMIT），且有超时上限：
+ * 一个挂死的命令会把整个代理卡住，那比失败更糟。
+ */
+
+/* 默认超时。超时后会杀掉进程并如实报告，不假装成功。 */
+#define CA_SHELL_TIMEOUT_MS 60000
+
+/* args_json 形如 {"command":"git status","timeout_ms":60000}
+ * timeout_ms 缺省或 <=0 时用 CA_SHELL_TIMEOUT_MS。 */
+ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json);
 
 #ifdef __cplusplus
 }

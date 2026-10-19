@@ -326,6 +326,170 @@ CA_TEST(list_dir_rejects_escape) {
     ca_ws_free(ws);
 }
 
+/* ==================================================== search */
+
+CA_TEST(search_finds_literal_and_reports_counts) {
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, ca_perm_deny_all);
+    ca_search_opts o;
+    memset(&o, 0, sizeof(o));
+    o.pattern = "line 123"; /* 在 1..200 的样本里唯一 */
+    ca_tool_status st = ca_tool_search(&ctx, &o);
+    CA_ASSERT_EQ_INT(st, CA_TOOL_OK);
+    /* 命中数必须出现在 result 属性里，且与正文一致 */
+    CA_ASSERT(strstr(g_result, "matches=\"1\"") != NULL);
+    CA_ASSERT(strstr(g_result, "123: line 123") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(search_result_has_no_contradictory_counts) {
+    /* 早先在 <result> 里写 matches="0" 占位、遍历完再补一个 summary，
+     * 于是同一份结果里出现两个互相矛盾的数字。这里断言只有一个来源。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, ca_perm_deny_all);
+    ca_search_opts o;
+    memset(&o, 0, sizeof(o));
+    o.pattern = "line";
+    (void)ca_tool_search(&ctx, &o);
+    const char *first = strstr(g_result, "matches=");
+    CA_ASSERT(first != NULL);
+    CA_ASSERT(strstr(first + 1, "matches=") == NULL);
+    CA_ASSERT(strstr(g_result, "<summary") == NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(search_marks_truncation) {
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, ca_perm_deny_all);
+    ca_search_opts o;
+    memset(&o, 0, sizeof(o));
+    o.pattern = "line";
+    o.max_results = 3; /* 必然截断 */
+    (void)ca_tool_search(&ctx, &o);
+    CA_ASSERT(strstr(g_result, "truncated=\"true\"") != NULL);
+    CA_ASSERT(strstr(g_result, "截断") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(search_rejects_empty_pattern) {
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, ca_perm_deny_all);
+    ca_search_opts o;
+    memset(&o, 0, sizeof(o));
+    o.pattern = "";
+    CA_ASSERT_EQ_INT(ca_tool_search(&ctx, &o), CA_TOOL_ERR_ARGS);
+    ca_ws_free(ws);
+}
+
+/* ==================================================== run_shell */
+
+static char g_seen_pending[4096];
+static const void *g_perm_user_ptr = NULL;
+
+static ca_permission perm_capture(const char *tool, void *user) {
+    (void)user;
+    const ca_tool_ctx *ctx = (const ca_tool_ctx *)g_perm_user_ptr;
+    const char *shown = ca_tool_pending_display(ctx, tool);
+    if (shown != NULL) {
+        size_t n = strlen(shown);
+        if (n > sizeof(g_seen_pending) - 1) n = sizeof(g_seen_pending) - 1;
+        memcpy(g_seen_pending, shown, n);
+        g_seen_pending[n] = '\0';
+    }
+    return CA_PERM_ALLOW;
+}
+
+CA_TEST(run_shell_defaults_to_deny) {
+    /* P1：没有权限回调即拒绝。执行 shell 是最危险的一类操作 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, NULL);
+    CA_ASSERT_EQ_INT(ca_tool_run_shell(&ctx, "{\"command\":\"echo hi\"}"),
+                     CA_TOOL_DENIED);
+    ca_ws_free(ws);
+}
+
+CA_TEST(run_shell_shows_full_command_before_approval) {
+    /* P5：命令原文必须**完整**展示，不折叠、不省略。
+     * 折叠命令等于让用户盲批一件他没看清的事。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    g_seen_pending[0] = '\0';
+    ca_tool_ctx ctx = make_ctx(ws, perm_capture);
+    g_perm_user_ptr = &ctx;
+    (void)ca_tool_run_shell(&ctx, "{\"command\":\"echo a-very-long-marker-12345\"}");
+    CA_ASSERT(strstr(g_seen_pending, "a-very-long-marker-12345") != NULL);
+    /* 必须没有任何折叠痕迹 */
+    CA_ASSERT(strstr(g_seen_pending, "...") == NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(run_shell_executes_and_reports_output) {
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    ca_tool_status st = ca_tool_run_shell(&ctx, "{\"command\":\"echo cagent_probe_marker\"}");
+    CA_ASSERT_EQ_INT(st, CA_TOOL_OK);
+    CA_ASSERT(strstr(g_result, "cagent_probe_marker") != NULL);
+    CA_ASSERT(strstr(g_result, "exit_code=\"0\"") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(run_shell_reports_failure_exit_code) {
+    /* 非零退出必须如实报告 exit_code，不能一律当成成功 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    (void)ca_tool_run_shell(&ctx, "{\"command\":\"exit 3\"}");
+    CA_ASSERT(strstr(g_result, "exit_code=\"3\"") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(run_shell_kills_command_on_timeout) {
+    /* 挂死的命令会拖住整个代理。必须有硬超时，且超时后**不能**
+     * 报告成成功——那会让模型以为命令做完了。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    /* 挂死命令必须用平台各自的形式：Windows 的 cmd 没有 sleep，
+     * 早先统一写 sleep 30，命令在 Windows 上立刻失败退出 127，
+     * 于是「超时」这条路径**一次都没被真正跑到**。 */
+#if defined(_WIN32)
+    const char *hang = "ping -n 30 127.0.0.1 > nul"; /* 约 29 秒 */
+#else
+    const char *hang = "sleep 30";
+#endif
+    char args[256];
+    snprintf(args, sizeof(args), "{\"command\":\"%s\",\"timeout_ms\":800}", hang);
+    ca_tool_status st = ca_tool_run_shell(&ctx, args);
+    CA_ASSERT_EQ_INT(st, CA_TOOL_ERR_IO);
+    CA_ASSERT(strstr(g_result, "status=\"timeout\"") != NULL);
+    CA_ASSERT(strstr(g_result, "这不是成功") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(run_shell_rejects_empty_command) {
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    CA_ASSERT_EQ_INT(ca_tool_run_shell(&ctx, "{\"command\":\"\"}"), CA_TOOL_ERR_ARGS);
+    ca_ws_free(ws);
+}
+
 /* ==================================================== 输出写入器 */
 
 CA_TEST(out_rejects_overflow_without_truncating) {
@@ -358,6 +522,16 @@ int main(void) {
         {"read_output_carries_provenance", ca_test_run_read_output_carries_provenance},
         {"list_dir_works_and_marks_entries", ca_test_run_list_dir_works_and_marks_entries},
         {"list_dir_rejects_escape", ca_test_run_list_dir_rejects_escape},
+        {"search_finds_literal_and_reports_counts", ca_test_run_search_finds_literal_and_reports_counts},
+        {"search_result_has_no_contradictory_counts", ca_test_run_search_result_has_no_contradictory_counts},
+        {"search_marks_truncation", ca_test_run_search_marks_truncation},
+        {"search_rejects_empty_pattern", ca_test_run_search_rejects_empty_pattern},
+        {"run_shell_defaults_to_deny", ca_test_run_run_shell_defaults_to_deny},
+        {"run_shell_shows_full_command_before_approval", ca_test_run_run_shell_shows_full_command_before_approval},
+        {"run_shell_executes_and_reports_output", ca_test_run_run_shell_executes_and_reports_output},
+        {"run_shell_reports_failure_exit_code", ca_test_run_run_shell_reports_failure_exit_code},
+        {"run_shell_kills_command_on_timeout", ca_test_run_run_shell_kills_command_on_timeout},
+        {"run_shell_rejects_empty_command", ca_test_run_run_shell_rejects_empty_command},
         {"out_rejects_overflow_without_truncating", ca_test_run_out_rejects_overflow_without_truncating},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

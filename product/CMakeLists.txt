@@ -52,8 +52,10 @@ add_library(cagent_json STATIC src/json.c)
 target_link_libraries(cagent_json PUBLIC cagent_buf)
 
 # ---- tools：工具层（契约 §5，含路径安全与权限模型） ----
-add_library(cagent_tools STATIC src/tools.c)
-target_link_libraries(cagent_tools PUBLIC cagent_json)
+# tools_shell.c 单独成文件：进程创建 / 管道 / 超时 / 目录遍历集中在一处，
+# 任何一处出错都可能是安全或挂死问题，混在一个文件里看不出边界。
+add_library(cagent_tools STATIC src/tools.c src/tools_shell.c)
+target_link_libraries(cagent_tools PUBLIC cagent_json cagent_buf)
 
 # ---- llm：服务适配（契约 §4.3） ----
 add_library(cagent_llm STATIC src/llm.c)

@@ -1,0 +1,516 @@
+/* tools_shell.c —— search 与 run_shell
+ * 契约：docs/design/contract.md §5.1 / §5.2（P5）
+ *
+ * 从 tools.c 拆出来不是因为它更复杂，而是因为**平台相关代码集中在一起
+ * 更好审计**：这一层处理进程创建、管道、超时、目录遍历——任何一处出错
+ * 都可能是安全问题或挂死问题，而它们全挤在一个文件里时很难看出边界。
+ */
+
+/* fopen 没有 C11 可移植的安全等价物（fopen_s 仅 MSVC 有）。
+ * 与 tools.c 同一处理：只对这一条关闭建议。
+ * 必须定义在**任何** CRT 头文件之前，否则不生效。 */
+#if defined(_MSC_VER)
+#  define _CRT_SECURE_NO_WARNINGS 1
+#endif
+
+#include "cagent/buf.h"
+#include "cagent/json.h"
+#include "cagent/tools.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "cagent/json.h"
+
+#if defined(_WIN32)
+#  include <windows.h>
+#else
+#  include <dirent.h>
+#  include <fcntl.h>
+#  include <poll.h>
+#  include <signal.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
+#endif
+
+/* ============================================================ 通用工具 */
+
+static int arg_string2(const char *json, const char *key, char *out, size_t cap) {
+    out[0] = '\0';
+    ca_json_cursor root, v;
+    ca_json_init(&root, json, strlen(json));
+    if (ca_json_enter_object(&root) != 0) return -1;
+    if (ca_json_field(&root, key, &v) != 1) return 0;
+    if (ca_json_read_string(&v, out, cap, NULL) != 0) return -1;
+    return 0;
+}
+
+static int arg_int2(const char *json, const char *key, long long *out) {
+    ca_json_cursor root, v;
+    ca_json_init(&root, json, strlen(json));
+    if (ca_json_enter_object(&root) != 0) return -1;
+    if (ca_json_field(&root, key, &v) != 1) return 0;
+    if (ca_json_read_int(&v, out) != 0) return -1;
+    return 0;
+}
+
+/* 判断权限。P1：没有回调即拒绝。 */
+static int ask_perm(ca_tool_ctx *ctx, const char *tool) {
+    if (ctx == NULL || ctx->perm == NULL) return 1;
+    return ctx->perm(tool, ctx->perm_user) == CA_PERM_ALLOW ? 0 : 1;
+}
+
+/* ============================================================ search */
+
+/* 常见噪声目录：搜代码时它们既慢又几乎不会有命中 */
+static const char *const k_skip_dirs[] = {
+    ".git", ".svn", ".hg", "node_modules", "__pycache__",
+    "build", "out", "dist", "cmake-build-debug", ".venv", "venv",
+};
+static const char *const k_skip_exts[] = {
+    ".exe", ".dll", ".so", ".dylib", ".lib", ".a", ".o", ".obj",
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".7z",
+};
+
+static int should_skip_dir(const char *name) {
+    for (size_t i = 0; i < sizeof(k_skip_dirs) / sizeof(k_skip_dirs[0]); i++) {
+        if (strcmp(name, k_skip_dirs[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static int should_skip_file(const char *name) {
+    size_t n = strlen(name);
+    for (size_t i = 0; i < sizeof(k_skip_exts) / sizeof(k_skip_exts[0]); i++) {
+        size_t en = strlen(k_skip_exts[i]);
+        if (n > en && strcmp(name + n - en, k_skip_exts[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+typedef struct {
+    ca_out *out;
+    const char *pattern;
+    const char *glob;
+    int max_results;
+    int found;
+    int truncated;
+    int files_with_hits;
+} search_state;
+
+/* 在单个文件里逐行找字面串。返回 -1 表示读失败（跳过该文件）。 */
+static void search_file(search_state *st, const char *abs, const char *rel) {
+    FILE *f = fopen(abs, "rb");
+    if (f == NULL) return;
+char line[8192];
+        size_t pat_len = strlen(st->pattern);
+        long line_no = 0;
+        int matched_in_file = 0;
+
+        while (fgets(line, (int)sizeof(line), f) != NULL) {
+        line_no++;
+        if (pat_len == 0) break;
+        /* 二分式朴素查找：先用首字符筛，再 memcmp。 */
+        char *hit = NULL;
+        for (char *p = line; (p = strchr(p, st->pattern[0])) != NULL; p++) {
+            if (memcmp(p, st->pattern, pat_len) == 0) { hit = p; break; }
+        }
+        if (hit == NULL) continue;
+
+        if (st->found >= st->max_results) {
+            st->truncated = 1;
+            break;
+        }
+        if (!matched_in_file) {
+            matched_in_file = 1;
+            st->files_with_hits++;
+            ca_out_printf(st->out, "\n%s\n", rel);
+        }
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) len--;
+        ca_out_printf(st->out, "  %ld: %.*s\n", line_no, (int)len, line);
+        st->found++;
+    }
+    fclose(f);
+}
+
+static void search_dir(search_state *st, const char *base, const char *rel, int depth) {
+    if (depth > 24) return; /* 防目录炸弹 */
+#if defined(_WIN32)
+    char pattern[2048];
+    snprintf(pattern, sizeof(pattern), "%s\\*", base);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        char child[2048];
+        snprintf(child, sizeof(child), "%s\\%s", base, fd.cFileName);
+        char childrel[2048];
+        if (rel[0] == '\0') {
+            snprintf(childrel, sizeof(childrel), "%s", fd.cFileName);
+        } else {
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, fd.cFileName);
+        }
+        if (is_dir) {
+            if (!should_skip_dir(fd.cFileName)) search_dir(st, child, childrel, depth + 1);
+        } else {
+            if (should_skip_file(fd.cFileName)) continue;
+            if (st->glob != NULL && st->glob[0] != '\0' &&
+                strstr(fd.cFileName, st->glob) == NULL) continue;
+            search_file(st, child, childrel);
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(base);
+    if (d == NULL) return;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        char child[2048];
+        snprintf(child, sizeof(child), "%s/%s", base, ent->d_name);
+        char childrel[2048];
+        if (rel[0] == '\0') {
+            snprintf(childrel, sizeof(childrel), "%s", ent->d_name);
+        } else {
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, ent->d_name);
+        }
+        struct stat sb;
+        if (stat(child, &sb) != 0) continue;
+        if (S_ISDIR(sb.st_mode)) {
+            if (!should_skip_dir(ent->d_name)) search_dir(st, child, childrel, depth + 1);
+        } else if (S_ISREG(sb.st_mode)) {
+            if (should_skip_file(ent->d_name)) continue;
+            if (st->glob != NULL && st->glob[0] != '\0' &&
+                strstr(ent->d_name, st->glob) == NULL) continue;
+            search_file(st, child, childrel);
+        }
+    }
+    closedir(d);
+#endif
+}
+
+ca_tool_status ca_tool_search(ca_tool_ctx *ctx, const ca_search_opts *opts) {
+    if (ctx == NULL || ctx->out == NULL || opts == NULL) return CA_TOOL_ERR_ARGS;
+    if (opts->pattern == NULL || opts->pattern[0] == '\0') {
+        ca_out_puts(ctx->out,
+                    "<result status=\"error\" error=\"搜索内容为空\">"
+                    "请给出要查找的字面内容。</result>");
+        return CA_TOOL_ERR_ARGS;
+    }
+    /* max_results <=0 用默认值。不在调用点构造临时复合字面量：
+     * 那种写法容易写出「字段数与结构体不符」的初始化（C2078）。 */
+    int max_results = opts->max_results;
+    if (max_results <= 0) max_results = 200;
+
+    /* 搜索只读，不惊动用户 */
+    char root[2048];
+    size_t need = 0;
+    if (ca_ws_resolve(ctx->ws, ".", root, sizeof(root), &need) != 0) {
+        ca_out_puts(ctx->out, "<result status=\"error\" error=\"无法定位工作区\"></result>");
+        return CA_TOOL_ERR_PATH;
+    }
+
+    /* 命中数在遍历完才知道，所以**先收集再输出**。
+     * 早先在 <result> 里先写 matches="0" 占位、遍历完再补一个 summary ——
+     * 于是同一份结果里出现两个互相矛盾的数字，模型读到哪个都可能出错。
+     *
+     * 收集缓冲必须**堆分配**：1 MB 放栈上会直接爆栈
+     * （MSVC 默认栈就是 1 MB）。 */
+    char *body = (char *)malloc(CA_TOOL_RESULT_LIMIT);
+    if (body == NULL) return CA_TOOL_ERR_TOO_LARGE;
+    ca_out body_out;
+    ca_out_init(&body_out, body, CA_TOOL_RESULT_LIMIT);
+
+    search_state st;
+    st.out = &body_out;
+    st.pattern = opts->pattern;
+    st.glob = opts->glob;
+    st.max_results = max_results;
+    st.found = 0;
+    st.truncated = 0;
+    st.files_with_hits = 0;
+
+    search_dir(&st, root, "", 0);
+
+    ca_out_printf(ctx->out,
+                  "<result tool=\"search\" query=\"%s\" matches=\"%d\" "
+                  "files=\"%d\" truncated=\"%s\">\n",
+                  opts->pattern, st.found, st.files_with_hits,
+                  st.truncated ? "true" : "false");
+    if (body_out.len > 0) ca_out_puts(ctx->out, body);
+    if (st.truncated) {
+        ca_out_puts(ctx->out,
+                    "\n<!-- 结果已按上限截断，以上不是全部命中。"
+                    "请缩小搜索范围或换一个更具体的关键词。 -->\n");
+    }
+    ca_out_puts(ctx->out, "</result>\n");
+    free(body);
+    return CA_TOOL_OK;
+}
+
+/* ============================================================ run_shell */
+
+#if defined(_WIN32)
+
+ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
+    char command[4096];
+    if (arg_string2(args_json, "command", command, sizeof(command)) != 0) {
+        return CA_TOOL_ERR_ARGS;
+    }
+    if (command[0] == '\0') {
+        ca_out_puts(ctx->out, "<result status=\"error\" error=\"命令为空\"></result>");
+        return CA_TOOL_ERR_ARGS;
+    }
+    long long timeout = 0;
+    (void)arg_int2(args_json, "timeout_ms", &timeout);
+    if (timeout <= 0) timeout = CA_SHELL_TIMEOUT_MS;
+
+    /* P5：把**完整命令原文**交给权限界面。不截断、不加省略号——
+     * 折叠命令等于让用户盲批一件他没看清的事。 */
+    static char pending[4200];
+    snprintf(pending, sizeof(pending),
+             "将执行以下命令（原文完整展示）：\n\n%s\n", command);
+    ctx->pending_display = pending;
+
+    /* P1 + P5：先问权限，且必须在解析之前 —— 不能先执行了才问。 */
+    if (ask_perm(ctx, "run_shell") != 0) {
+        ctx->pending_display = NULL;
+        ca_out_puts(ctx->out,
+                    "<result status=\"denied\" tool=\"run_shell\">"
+                    "用户拒绝了执行命令。可以先说明这条命令做什么，"
+                    "或改用不执行命令的方式。</result>");
+        return CA_TOOL_DENIED;
+    }
+    ctx->pending_display = NULL;
+
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return CA_TOOL_ERR_IO;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    char cmdline[4200];
+    snprintf(cmdline, sizeof(cmdline), "cmd.exe /c %s", command);
+
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        CloseHandle(rd);
+        CloseHandle(wr);
+        ca_out_puts(ctx->out,
+                    "<result status=\"error\" error=\"无法启动命令\">"
+                    "系统拒绝创建该进程。</result>");
+        return CA_TOOL_ERR_IO;
+    }
+    CloseHandle(wr);
+
+    /* 读取输出到上限为止，并按超时轮询。
+     * 挂死的命令会拖住整个代理，必须有硬超时。 */
+    char buf[8192];
+    char *out_buf = (char *)malloc(CA_TOOL_RESULT_LIMIT + 1);
+    size_t out_len = 0;
+    int overflow = 0;
+    int timed_out = 0;
+    DWORD waited = 0;
+    const DWORD slice = 50;
+
+    for (;;) {
+        DWORD avail = 0;
+        if (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+            DWORD want = avail;
+            if (want > sizeof(buf)) want = (DWORD)sizeof(buf);
+            DWORD got = 0;
+            if (ReadFile(rd, buf, want, &got, NULL) && got > 0) {
+                for (DWORD i = 0; i < got; i++) {
+                    if (out_len < CA_TOOL_RESULT_LIMIT) out_buf[out_len++] = buf[i];
+                    else overflow = 1;
+                }
+            }
+            continue;
+        }
+        if (WaitForSingleObject(pi.hProcess, slice) == WAIT_OBJECT_0) {
+            /* 进程结束，再把管道里剩下的读干净 */
+            DWORD rest = 0;
+            if (PeekNamedPipe(rd, NULL, 0, NULL, &rest, NULL) && rest > 0) {
+                DWORD want = rest;
+                if (want > sizeof(buf)) want = (DWORD)sizeof(buf);
+                DWORD got = 0;
+                if (ReadFile(rd, buf, want, &got, NULL) && got > 0) {
+                    for (DWORD i = 0; i < got; i++) {
+                        if (out_len < CA_TOOL_RESULT_LIMIT) out_buf[out_len++] = buf[i];
+                        else overflow = 1;
+                    }
+                }
+                continue;
+            }
+            break;
+        }
+        waited += slice;
+        if ((long long)waited >= timeout) {
+            timed_out = 1;
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 2000);
+            break;
+        }
+    }
+    CloseHandle(rd);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    out_buf[out_len] = '\0';
+
+    ca_out_printf(ctx->out,
+                  "<result tool=\"run_shell\" status=\"%s\" exit_code=\"%d\" "
+                  "timeout=\"%s\" truncated=\"%s\">\n",
+                  timed_out ? "timeout" : "ok", (int)code,
+                  timed_out ? "true" : "false", overflow ? "true" : "false");
+    if (out_len > 0) ca_out_puts(ctx->out, out_buf);
+    if (overflow) {
+        ca_out_puts(ctx->out,
+                    "\n<!-- 输出超出上限已截断。如需完整输出，"
+                    "请把命令改得更精确，或把输出写入文件再读。 -->\n");
+    }
+    if (timed_out) {
+        ca_out_printf(ctx->out,
+                      "\n<!-- 命令超过 %lld 毫秒上限，已终止。"
+                      "这不是成功——请检查命令是否在等待输入。 -->\n", timeout);
+    }
+    ca_out_puts(ctx->out, "</result>\n");
+    free(out_buf);
+    return timed_out ? CA_TOOL_ERR_IO : CA_TOOL_OK;
+}
+
+#else /* POSIX */
+
+ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
+    char command[4096];
+    if (arg_string2(args_json, "command", command, sizeof(command)) != 0) {
+        return CA_TOOL_ERR_ARGS;
+    }
+    if (command[0] == '\0') {
+        ca_out_puts(ctx->out, "<result status=\"error\" error=\"命令为空\"></result>");
+        return CA_TOOL_ERR_ARGS;
+    }
+    long long timeout = 0;
+    (void)arg_int2(args_json, "timeout_ms", &timeout);
+    if (timeout <= 0) timeout = CA_SHELL_TIMEOUT_MS;
+
+    if (ask_perm(ctx, "run_shell") != 0) {
+        ca_out_puts(ctx->out,
+                    "<result status=\"denied\" tool=\"run_shell\">"
+                    "用户拒绝了执行命令。可以先说明这条命令做什么，"
+                    "或改用不执行命令的方式。</result>");
+        return CA_TOOL_DENIED;
+    }
+
+    int fds[2];
+    if (pipe(fds) != 0) return CA_TOOL_ERR_IO;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return CA_TOOL_ERR_IO;
+    }
+    if (pid == 0) {
+        /* 子进程：重定向输出后交给 /bin/sh */
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(fds[1], STDERR_FILENO);
+        close(fds[1]);
+        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+        _exit(127);
+    }
+    close(fds[1]);
+
+    char *out_buf = (char *)malloc(CA_TOOL_RESULT_LIMIT + 1);
+    size_t out_len = 0;
+    int overflow = 0;
+    int timed_out = 0;
+    long long waited = 0;
+
+    for (;;) {
+        struct pollfd pfd;
+        pfd.fd = fds[0];
+        pfd.events = POLLIN;
+        int pr = poll(&pfd, 1, 50);
+        if (pr > 0 && (pfd.revents & (POLLIN | POLLHUP))) {
+            char buf[8192];
+            ssize_t n = read(fds[0], buf, sizeof(buf));
+            if (n > 0) {
+                for (ssize_t i = 0; i < n; i++) {
+                    if (out_len < CA_TOOL_RESULT_LIMIT) out_buf[out_len++] = buf[i];
+                    else overflow = 1;
+                }
+                continue;
+            }
+            if (n == 0) break; /* EOF */
+        }
+        int status = 0;
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            /* 进程已退出，再把管道读干净 */
+            char buf[8192];
+            ssize_t n;
+            while ((n = read(fds[0], buf, sizeof(buf))) > 0) {
+                for (ssize_t i = 0; i < n; i++) {
+                    if (out_len < CA_TOOL_RESULT_LIMIT) out_buf[out_len++] = buf[i];
+                    else overflow = 1;
+                }
+            }
+            break;
+        }
+        waited += 50;
+        if (waited >= timeout) {
+            timed_out = 1;
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            break;
+        }
+    }
+    close(fds[0]);
+    out_buf[out_len] = '\0';
+
+    int exit_code = -1;
+    if (!timed_out) {
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == 0) { /* 已在上方回收 */ }
+        exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
+    ca_out_printf(ctx->out,
+                  "<result tool=\"run_shell\" status=\"%s\" exit_code=\"%d\" "
+                  "timeout=\"%s\" truncated=\"%s\">\n",
+                  timed_out ? "timeout" : "ok", exit_code,
+                  timed_out ? "true" : "false", overflow ? "true" : "false");
+    if (out_len > 0) ca_out_puts(ctx->out, out_buf);
+    if (overflow) {
+        ca_out_puts(ctx->out,
+                    "\n<!-- 输出超出上限已截断。如需完整输出，"
+                    "请把命令改得更精确，或把输出写入文件再读。 -->\n");
+    }
+    if (timed_out) {
+        ca_out_printf(ctx->out,
+                      "\n<!-- 命令超过 %lld 毫秒上限，已终止。"
+                      "这不是成功——请检查命令是否在等待输入。 -->\n", timeout);
+    }
+    ca_out_puts(ctx->out, "</result>\n");
+    free(out_buf);
+    return timed_out ? CA_TOOL_ERR_IO : CA_TOOL_OK;
+}
+
+#endif /* _WIN32 */
