@@ -244,6 +244,12 @@ cmake -S product -B build-curl -G "Visual Studio 15 2017" -A x64 \
 
 `product/conanfile.txt` 保留着，供能访问 Conan Center 的环境使用，但**本机走不通**。
 
+**CI 上走的是 vcpkg**（windows-latest 自带），而非自建：
+`vcpkg install curl:x64-windows-static-md` + `-DVCPKG_TARGET_TRIPLET=x64-windows-static-md`。
+接线曾经是错的——装了 `-static-md` 却按默认 `x64-windows` 去找，
+`VCPKG_INSTALLED_DIR` 又设成了带 triplet 的目录（工具链会再追加一次），
+两处错位叠加导致 Windows 上 curl **从未被找到**。修正后 Windows 才第一次真实运行传输层。
+
 ### 2.5.5.2 已证实的与未证实的
 
 | 项 | 结论 |
@@ -252,7 +258,13 @@ cmake -S product -B build-curl -G "Visual Studio 15 2017" -A x64 \
 | `Authorization: Bearer <key>` 上线 | ✅ 已证实（服务端记录到完整头） |
 | 逐块到达、逐 token 上屏 | ✅ 已证实（输出长度 200ms/400ms/600ms 分别为 8/17/32 字节） |
 | **真实第三方 HTTPS API** | ❌ **未验证**——本仓库没有可用凭据，也不该把凭据放进测试 |
-| Linux / macOS 本地运行 | ❌ 未验证（仅 CI 编译 + 模块模式链接） |
+| CI 三平台真实运行 | ✅ 已证实（Linux: `libcurl4-openssl-dev` / macOS: `brew curl` / Windows: vcpkg `curl:x64-windows-static-md`） |
+
+CI 上这三件事现在是**硬门禁**（不再只是 warning）：
+构建零告警、传输后端必须是 libcurl、真实请求冒烟必须成功。
+早先「确认 libcurl 后端已编入」只发 `::warning`，而它的判据（grep 中文）
+在 Windows 上因 CMake 把非 ASCII 输出成 `?` 而**永远匹配不上**——
+于是「Windows 从未验证过传输层」这件事被静默掩盖了很久。
 
 > 「能连本地服务」比「能连某家云服务」弱，但它验证的是**我们自己的代码**；
 > 云服务那一层还牵涉账号、配额与地区，不该混进同一个结论里。
