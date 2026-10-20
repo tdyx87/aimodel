@@ -119,8 +119,18 @@ jobs:
             exit 1
           fi
           tail -3 vcpkg.log
-          echo "VCPKG_INSTALLED_DIR=${VCPKG_INSTALLATION_ROOT}/installed/x64-windows-static-md" >> "$GITHUB_ENV"
-          echo "vcpkg 就绪: ${VCPKG_INSTALLATION_ROOT}"
+          # 这里只设 **triplet**，不设 VCPKG_INSTALLED_DIR。
+          #
+          # 两个错位叠加，导致 Windows 上 curl **从未被找到过**（后端一直是
+          # 内存实现），而旧检查只发 ::warning，于是这个事实长期没人知道：
+          #   1. 装的是 curl:x64-windows-static-md，却没设 triplet，
+          #      工具链按默认 x64-windows 去找 —— 那个目录里什么都没有；
+          #   2. VCPKG_INSTALLED_DIR 被设成 `${VCPKG_ROOT}/installed/x64-windows-static-md`，
+          #      但工具链会在它后面**再追加一次 triplet**，拼出
+          #      `installed/x64-windows-static-md/x64-windows-static-md`。
+          #      VCPKG_INSTALLED_DIR 的语义是 installed **根目录**，不是某个 triplet 目录。
+          echo "VCPKG_DEFAULT_TRIPLET=x64-windows-static-md" >> "$GITHUB_ENV"
+          echo "vcpkg 就绪: ${VCPKG_INSTALLATION_ROOT} (triplet x64-windows-static-md)"
 
       - name: 准备 Python（用于内存实测交叉核对）
         uses: actions/setup-python@v5
@@ -165,6 +175,10 @@ jobs:
             fi
             echo "vcpkg 根目录: $VCPKG_HOME"
             CA_CMAKE_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$VCPKG_HOME/scripts/buildsystems/vcpkg.cmake")
+            # 显式传 triplet，而不是靠 VCPKG_DEFAULT_TRIPLET 环境变量：
+            # 上面装的是 x64-windows-static-md，工具链默认却是 x64-windows，
+            # 两者不一致时 find_package(CURL) 会在空目录里找，静默失败。
+            CA_CMAKE_ARGS+=(-DVCPKG_TARGET_TRIPLET=x64-windows-static-md)
           fi
           # 刻意不叫 CMAKE_ARGS：那是 GitHub Actions 自己的环境变量。
           #
