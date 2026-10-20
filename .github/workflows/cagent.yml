@@ -213,13 +213,20 @@ jobs:
       - name: 确认 libcurl 后端已编入
         shell: bash
         run: |
-          set -e
-          if grep -q "使用 libcurl 传输后端" build/CMakeCache.txt 2>/dev/null \
-             || grep -rq "CAGENT_HAVE_CURL" build/CMakeFiles 2>/dev/null; then
-            echo "libcurl 后端：已编入"
-          else
-            echo "::warning title=libcurl 后端未编入::本次仅验证内存后端"
+          set +e
+          set -uo pipefail
+          # 配置期的 message(STATUS) 只落在 cfg.log 里，**不会**写进 CMakeCache.txt。
+          # 早先 grep CMakeCache.txt 必然是空结果，只因后面还有一条 CMakeFiles
+          # 回退（硬编码字符串哪个文件都不含）才没暴露出「检查其实从未生效」。
+          #
+          # 这里必须是**硬失败**：紧随其后的真实请求冒烟依赖这条结论。
+          # 少了 curl，冒烟只会报「服务端没收到请求」，看起来像传输层写错了，
+          # 其实是后端根本没编进来 —— 那是两条完全不同的排查方向。
+          if ! grep -q "使用 libcurl 传输后端" cfg.log 2>/dev/null; then
+            echo "::error title=libcurl 后端未编入::紧跟的真实请求冒烟必然失败；请确认 runner 装有 libcurl 开发包（ubuntu: libcurl4-openssl-dev / macOS: 自带 / windows: vcpkg curl）"
+            exit 1
           fi
+          echo "libcurl 后端：已编入"
 
       - name: 单元测试（含 100 MB 流式内存实测）
         shell: bash
@@ -304,6 +311,38 @@ jobs:
             exit 1
           fi
           cat mem.log
+
+      # transport_curl.c 在 CI 上一直只是**被编译**，从未**被运行**。
+      # 编译通过证明不了它会发请求、会逐块收、会带上 Authorization。
+      # 这一步起一个本地 SSE 服务，让真实 libcurl 打过去。
+      - name: 真实 libcurl 请求冒烟
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          EXE=""
+          for cand in build/Release/cagent.exe build/cagent.exe build/cagent; do
+            if [ -f "$cand" ]; then EXE="$cand"; break; fi
+          done
+          if [ -z "$EXE" ]; then
+            echo "::error title=找不到 cagent 可执行文件::真实请求冒烟无法进行"
+            find build -maxdepth 2 -name 'cagent*' -type f 2>/dev/null || true
+            exit 1
+          fi
+          echo "可执行文件: $EXE"
+          if ! python3 scripts/curl_smoke.py "$EXE" > smoke.log 2>&1; then
+            {
+              echo '### ❌ 真实 libcurl 请求冒烟失败'
+              echo '```'; tail -c 4000 smoke.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 8 ] && break
+              echo "::error title=冒烟#$n::$line"
+            done < <(tail -10 smoke.log)
+            exit 1
+          fi
+          cat smoke.log
 
       - name: 工具链指纹（失败时也打印）
         if: always()

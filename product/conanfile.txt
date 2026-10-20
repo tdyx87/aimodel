@@ -1,0 +1,30 @@
+# 本地开发用：从 Conan Center 取 libcurl 开发包。
+#
+# 为什么需要它：CI 三平台自带 libcurl 开发包，但 Windows 开发机上往往只有
+# curl.exe（没有头文件与导入库），于是 transport_curl.c 永远只被 CI 编译，
+# 本地一次都没跑过 —— 「本机没编过」本身就是风险。
+#
+# 用法（Conan 2）：
+#   conan install . -of build-conan --build=missing -pr:h ./conan_profile_win2017
+#   cmake -S . -B build-curl -DCMAKE_TOOLCHAIN_FILE=build-conan/conan_toolchain.cmake
+#   cmake --build build-curl --config Release
+#
+# **不要把它设为构建的硬前置**：契约 §2.5.5 要求 libcurl 缺失时降级而非报错。
+# 这个文件只服务于「想在本机验证 curl 后端」的场景。
+
+[requires]
+curl/8.10.1
+
+[options]
+# 只验证 HTTP 链路时关掉 TLS 依赖，避免为了一个 curl 再编一遍 OpenSSL。
+# 需要验证 HTTPS 时把下面两行删掉（会引入 openssl 依赖）。
+curl/*:with_ssl=False
+curl/*:with_zlib=False
+curl/*:with_brotli=False
+curl/*:with_zstd=False
+curl/*:with_libssh2=False
+curl/*:with_nghttp2=False
+
+[generators]
+CMakeDeps
+CMakeToolchain

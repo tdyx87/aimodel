@@ -90,7 +90,15 @@ target_link_libraries(cagent_llm PUBLIC cagent_json cagent_http cagent_tools)
 # 传输做成接口（ca_transport_ops）而不是直接调 libcurl：
 #   1. 契约 C1 要求「只有流式回调」，做成接口等于结构上强制；
 #   2. 传输逻辑可在无网络下被完整测试，不必依赖网络抖动。
-find_package(CURL QUIET)
+# 优先 config 模式：自建 / vcpkg / Conan 提供的是 CURLConfig.cmake，
+# 它带着静态链接所需的**传递依赖**（Windows 上用 Schannel 时需要 crypt32、
+# secur32 等）。FindCURL 模块只给出库文件本身，静态链接时不知道这些，
+# 表现是链接期一堆 LNK2019。
+# 找不到 config 再退回模块模式（Linux 发行版常见这种布局）。
+find_package(CURL QUIET CONFIG)
+if (NOT CURL_FOUND)
+    find_package(CURL QUIET MODULE)
+endif()
 add_library(cagent_http STATIC
     src/transport_mem.c
     src/transport_curl.c)
@@ -99,7 +107,13 @@ target_link_libraries(cagent_http PUBLIC cagent_sse)
 if (CURL_FOUND)
     target_link_libraries(cagent_http PRIVATE CURL::libcurl)
     target_compile_definitions(cagent_http PRIVATE CAGENT_HAVE_CURL=1)
-    message(STATUS "cagent: 使用 libcurl 传输后端 (${CURL_VERSION_STRING})")
+    # config 模式不一定会设 CURL_VERSION_STRING（模块模式才会）。
+    # 直接写 "$()" 会在构建日志里留一个空括号，看起来像是版本探测坏了。
+    if (CURL_VERSION_STRING)
+        message(STATUS "cagent: 使用 libcurl 传输后端 (${CURL_VERSION_STRING})")
+    else()
+        message(STATUS "cagent: 使用 libcurl 传输后端")
+    endif()
 else()
     # 刻意**降级而非报错**：缺 libcurl 时其余层仍可构建与测试，
     # 只是运行时会拒绝联网请求并在界面上说明原因。

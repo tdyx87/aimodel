@@ -208,11 +208,7 @@ NFR-1 承诺的是**空闲常驻** RSS。单元测试跑完即退出，测不出
 | 后端 | 状态 |
 |------|------|
 | 内存后端 | ✅ 已实现并测试（23 次检查 0 失败） |
-| libcurl 后端 | ⚠️ **本机未编译验证** |
-
-本机（Windows / MSVC）只有 `curl.exe`，**没有开发文件**；
-`find_package(CURL)` 为 NOTFOUND。curl.se 只提供 MinGW 包，
-无 MSVC 导入库，因此本地无法链接。
+| libcurl 后端 | ✅ **本地已用真实请求验证**（Windows x64，静态 Schannel 构建） |
 
 处理方式：
 
@@ -220,11 +216,46 @@ NFR-1 承诺的是**空闲常驻** RSS。单元测试跑完即退出，测不出
 |------|------|
 | 传输做成 `ca_transport_ops` 接口 | 契约 C1 要求「只有流式回调」，做成接口等于**结构上强制**，而不是靠注释提醒 |
 | libcurl 缺失时**降级而非报错** | 其余层仍可构建与测试。NSIS 那次的教训：把可选依赖设为硬前置，一次包源抖动就拖红整条 CI 腿 |
-| libcurl 实现由 CI 验证 | GitHub 运行器三平台均自带 libcurl 开发包 |
+| 优先 `find_package(CURL CONFIG)` | 自建 / vcpkg / Conan 提供的是 CURLConfig.cmake，它带着静态链接所需的传递依赖（Schannel 需要 crypt32 等）。FindCURL 模块只给库文件本身，静态链接时不知道这些 |
+| 由 `scripts/curl_smoke.py` 验证 | **编译通过证明不了它会发请求**。脚本起真 socket、发真 POST、读真流式响应 |
 
-**诚实声明**：`src/transport_curl.c` 目前**未经编译验证**，
-其首次编译将在 CI 上发生。若编译失败，问题会立刻暴露（编译错误而非静默降级），
-但在此之前不得声称该后端可用。
+### 2.5.5.1 本机如何拿到 libcurl 开发包
+
+本机（Windows / MSVC）只有 `curl.exe`，没有头文件与导入库，
+`find_package(CURL)` 原本是 NOTFOUND。走 Conan 失败：**Conan Center 返回 403**
+（`center2.conan.io` 与 `center.conan.io` 均被拦），配置的两个镜像
+（`iteale` DNS 解析失败、本机 Artifactory 未运行）也不可用。
+本机缓存中没有任何 curl recipe。
+
+因此改为从 GitHub 取 curl 源码自行构建（GitHub 可访问）：
+
+```
+cmake -S curl -B curl-b -G "Visual Studio 15 2017" -A x64 \
+      -DCMAKE_INSTALL_PREFIX=<prefix> -DBUILD_SHARED_LIBS=OFF \
+      -DCURL_USE_SCHANNEL=ON -DCURL_USE_OPENSSL=OFF -DCURL_USE_LIBPSL=OFF \
+      -DCURL_DISABLE_LDAP=ON -DCURL_ZLIB=OFF -DBUILD_CURL_EXE=OFF
+cmake --build curl-b --config Release
+cmake --install curl-b --config Release --prefix <prefix>
+cmake -S product -B build-curl -G "Visual Studio 15 2017" -A x64 \
+      -DCMAKE_PREFIX_PATH=<prefix>
+```
+
+用 **Schannel** 而不是 OpenSSL：走系统证书库，不需要额外编一个 OpenSSL。
+
+`product/conanfile.txt` 保留着，供能访问 Conan Center 的环境使用，但**本机走不通**。
+
+### 2.5.5.2 已证实的与未证实的
+
+| 项 | 结论 |
+|---|---|
+| 真实 TCP + HTTP POST | ✅ 已证实（本地 SSE 服务收到 `POST /v1/chat/completions`） |
+| `Authorization: Bearer <key>` 上线 | ✅ 已证实（服务端记录到完整头） |
+| 逐块到达、逐 token 上屏 | ✅ 已证实（输出长度 200ms/400ms/600ms 分别为 8/17/32 字节） |
+| **真实第三方 HTTPS API** | ❌ **未验证**——本仓库没有可用凭据，也不该把凭据放进测试 |
+| Linux / macOS 本地运行 | ❌ 未验证（仅 CI 编译 + 模块模式链接） |
+
+> 「能连本地服务」比「能连某家云服务」弱，但它验证的是**我们自己的代码**；
+> 云服务那一层还牵涉账号、配额与地区，不该混进同一个结论里。
 
 ### 2.5.6 分层实现进度（截至 `f211fea`）
 
@@ -235,14 +266,14 @@ NFR-1 承诺的是**空闲常驻** RSS。单元测试跑完即退出，测不出
 | `sse` 分帧 | §4.2 | ✅ 容忍 CRLF、多 `data:` 行、心跳注释 | `sse_test` |
 | `http` 传输接口 | §4.1 | ✅ 仅流式回调（C1 的结构性落实） | `http_test` |
 | `transport_mem` | §4.1 | ✅ | `http_test` |
-| `transport_curl` | §4.1 | ⚠️ 仅 CI 编译（见 §2.5.5） | CI |
+| `transport_curl` | §4.1 | ✅ 真实请求已验证（见 §2.5.5.2） | `scripts/curl_smoke.py` |
 | `json` 零分配游标 | C6 | ✅ | `json_test` |
 | `llm` 事件流 | §4.3 | ✅ 定长工具槽位 | `llm_test` |
 | `tools` 六工具 | §5.1 | ✅ | `tools_test` |
 | `ui` 渲染 + 非 TTY 降级 | §7 | ✅ | `ui_test` |
 | `core` 代理主循环 | §3 | ✅ | `core_test` |
 | `session` 持久化 | §6 | ❌ 未开始 | — |
-| `main` 可执行入口 | — | ❌ 未开始 | — |
+| `main` 可执行入口 | — | ✅ 离线 E2E + 真实 libcurl 冒烟 | `scripts/curl_smoke.py` |
 
 **`core` 的验证方式**：`ca_core_config.transport` 是**注入**的，不是硬编码 libcurl。
 测试用脚本化假传输层喂预设 SSE，并按 3 / 11 字节切块分次投喂——
@@ -251,9 +282,12 @@ NFR-1 承诺的是**空闲常驻** RSS。单元测试跑完即退出，测不出
 
 **尚未成立的能力**（不得声称）：
 
-- **没有可执行文件**。`core` 是库，`main()` 尚未写，故 US-1「启动即用」没有端到端证据。
+- **真实第三方 API 未验证**。本地已对自建 SSE 服务发起过真实请求（§2.5.5.2），
+  但没有可用凭据去打真实的云服务。
 - **没有多轮记忆**。`session` 层未做，历史窗口 4 MB 封顶（§2.1）尚未落地。
   当前 core 只在**单次输入内**做工具轮次回灌（上限 `CA_CORE_MAX_TOOL_ROUNDS = 8`）。
+- **`main` 的离线路径尚未进入 ctest**。离线模式（`CAGENT_TRANSPORT=mem`）是手工验证的；
+  只有真实 libcurl 冒烟（`scripts/curl_smoke.py`）会进 CI。
 
 ### 2.5.7 实现期发现并修正的三处
 
