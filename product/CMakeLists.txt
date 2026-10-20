@@ -114,13 +114,23 @@ if (CURL_FOUND)
     else()
         message(STATUS "cagent: 使用 libcurl 传输后端")
     endif()
+    set(CA_TRANSPORT_BACKEND "libcurl")
 else()
     # 刻意**降级而非报错**：缺 libcurl 时其余层仍可构建与测试，
     # 只是运行时会拒绝联网请求并在界面上说明原因。
     # 早前把 NSIS 设为打包硬前置、结果包源一次 504 拖红整条 CI 腿，
     # 那是依赖层级搞错的反面教材——此处不能让可选依赖变成阻塞项。
     message(STATUS "cagent: 未找到 libcurl，仅构建内存传输后端（无法联网）")
+    set(CA_TRANSPORT_BACKEND "mem")
 endif()
+
+# 机器可读的一行，**必须是纯 ASCII**。
+# 实测：Windows 上 CMake 把非 ASCII 输出成 '?'（`cagent: ?????????
+# libcurl ?????????`），于是任何按中文去 grep 配置日志的检查在 Windows
+# 上**永远匹配不上**——与是否真的找到 curl 毫无关系。
+# 这个教训来自 CI 上「libcurl 后端未编入」的误报：那次不是缺依赖，
+# 是检查语句本身在非英文区域根本没生效过。
+message(STATUS "cagent: CAGENT_TRANSPORT_BACKEND=${CA_TRANSPORT_BACKEND}")
 
 # ---- 工具 ----
 # 空闲内存探针：NFR-1 承诺的是常驻占用，而单元测试跑完就退出，

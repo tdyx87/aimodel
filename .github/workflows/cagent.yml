@@ -215,18 +215,26 @@ jobs:
         run: |
           set +e
           set -uo pipefail
-          # 配置期的 message(STATUS) 只落在 cfg.log 里，**不会**写进 CMakeCache.txt。
-          # 早先 grep CMakeCache.txt 必然是空结果，只因后面还有一条 CMakeFiles
-          # 回退（硬编码字符串哪个文件都不含）才没暴露出「检查其实从未生效」。
+          # 只看**纯 ASCII** 的机器可读标记，不看中文。
+          # 教训：早先按中文 grep 配置日志，而 Windows 上 CMake 会把非 ASCII
+          # 输出成 '?'，检查在 Windows 上永远匹配不上——与是否真的找到 curl
+          # 无关，纯属检查语句自身失效。另：配置期的 message(STATUS) 只落在
+          # cfg.log，**不会**写进 CMakeCache.txt（旧写法 grep 的是后者）。
           #
           # 这里必须是**硬失败**：紧随其后的真实请求冒烟依赖这条结论。
           # 少了 curl，冒烟只会报「服务端没收到请求」，看起来像传输层写错了，
-          # 其实是后端根本没编进来 —— 那是两条完全不同的排查方向。
-          if ! grep -q "使用 libcurl 传输后端" cfg.log 2>/dev/null; then
-            echo "::error title=libcurl 后端未编入::紧跟的真实请求冒烟必然失败；请确认 runner 装有 libcurl 开发包（ubuntu: libcurl4-openssl-dev / macOS: 自带 / windows: vcpkg curl）"
+          # 其实是后端根本没编进来——那是两条完全不同的排查方向。
+          BACKEND="$(grep -o 'CAGENT_TRANSPORT_BACKEND=[A-Za-z]*' cfg.log 2>/dev/null | head -1 | cut -d= -f2)"
+          if [ "$BACKEND" = "libcurl" ]; then
+            echo "libcurl 后端：已编入"
+          elif [ -z "$BACKEND" ]; then
+            echo "::error title=无法判定传输后端::cfg.log 里没有 CAGENT_TRANSPORT_BACKEND 标记（可能是 CMake 太旧或配置日志缺失）"
+            tail -20 cfg.log 2>/dev/null || true
+            exit 1
+          else
+            echo "::error title=libcurl 后端未编入::后端=$BACKEND。紧跟的真实请求冒烟必然失败；请确认 runner 装有 libcurl 开发包（ubuntu: libcurl4-openssl-dev / macOS: 自带 / windows: vcpkg 或自建）"
             exit 1
           fi
-          echo "libcurl 后端：已编入"
 
       - name: 单元测试（含 100 MB 流式内存实测）
         shell: bash
