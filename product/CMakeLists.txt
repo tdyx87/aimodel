@@ -16,6 +16,14 @@ set(CMAKE_C_EXTENSIONS OFF)
 if(NOT WIN32)
     add_compile_definitions(_POSIX_C_SOURCE=200809L)
 endif()
+# macOS 的「POSIX 模式」和 glibc 不一样：Darwin 把 ru_maxrss 等 BSD 扩展
+# 挡在 _DARWIN_C_SOURCE 后面。只给 _POSIX_C_SOURCE 时，
+# <sys/resource.h> 里的 struct rusage **没有** ru_maxrss 这个成员
+# （Linux 上则有）。于是同一份代码在 Ubuntu 编译通过、在 macOS 编译失败。
+# 「严格 POSIX」不是跨 libc 一致的，这一点必须显式处理。
+if(APPLE)
+    add_compile_definitions(_DARWIN_C_SOURCE)
+endif()
 
 option(CAGENT_BUILD_TESTS "构建单元测试" ON)
 
