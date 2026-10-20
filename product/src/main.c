@@ -42,6 +42,13 @@
  * **放在栈上会直接爆栈**（core_test 曾因这个崩溃），必须是静态存储。 */
 static ca_core g_core;
 
+/* 会话（US-6）。历史预算 4 MB，与契约 §2.1 一致。
+ * 会话目录取不到时（没有 HOME/APPDATA 之类）**降级**为不落盘：
+ * 内存里的多轮记忆照常工作，只是关掉进程就没了。 */
+static ca_session g_session;
+static char g_sess_dir[CA_SESSION_MAX_PATH];
+static int g_sess_dir_ok;
+
 static const char *k_banner =
     "cagent —— 低内存终端代理（C99）\n"
     "输入 /help 查看命令，/exit 退出。\n";
@@ -85,18 +92,112 @@ static void print_mem(ca_ui *ui, const char *transport_name) {
     ca_ui_printf(ui, "传输后端：%s\n", transport_name);
 }
 
+/* 取命令的第一个参数（跳过一个以上的空白）。没有参数返回 NULL。 */
+static const char *cmd_arg(const char *line) {
+    const char *p = line;
+    while (*p != '\0' && *p != ' ' && *p != '\t') p++;
+    while (*p == ' ' || *p == '\t') p++;
+    return (*p == '\0') ? NULL : p;
+}
+
+static void save_session_quietly(void) {
+    if (g_sess_dir_ok && ca_session_count(&g_session) > 0) {
+        (void)ca_session_save(&g_session, g_sess_dir);
+    }
+}
+
 /* 返回 1 表示要求退出。 */
 static int run_command(ca_ui *ui, const char *line, const char *transport_name) {
     if (strcmp(line, "/exit") == 0 || strcmp(line, "/quit") == 0) return 1;
     if (strcmp(line, "/help") == 0) {
         ca_ui_line(ui, "命令：");
-        ca_ui_line(ui, "  /help   显示本帮助");
-        ca_ui_line(ui, "  /mem    显示当前与峰值 RSS");
-        ca_ui_line(ui, "  /exit   退出");
+        ca_ui_line(ui, "  /help          显示本帮助");
+        ca_ui_line(ui, "  /mem           显示当前与峰值 RSS");
+        ca_ui_line(ui, "  /new           开始新会话（当前对话从记忆中清除）");
+        ca_ui_line(ui, "  /list          列出历史会话（新到旧）");
+        ca_ui_line(ui, "  /resume <id>   继续指定的会话");
+        ca_ui_line(ui, "  /delete <id>   删除指定的会话");
+        ca_ui_line(ui, "  /exit          退出");
         return 0;
     }
     if (strcmp(line, "/mem") == 0) {
         print_mem(ui, transport_name);
+        ca_ui_printf(ui, "会话历史：%lu / %lu 字节，%lu 条消息\n",
+                     (unsigned long)ca_session_used(&g_session),
+                     (unsigned long)ca_session_budget(&g_session),
+                     (unsigned long)ca_session_count(&g_session));
+        return 0;
+    }
+    if (strcmp(line, "/new") == 0) {
+        /* 只清内存，不动磁盘：开启新会话不该顺手删掉旧会话。 */
+        save_session_quietly();
+        g_session.count = 0;
+        g_session.used = 0;
+        g_session.buf[0] = '\0';
+        g_session.id[0] = '\0';
+        ca_ui_line(ui, "已开始新会话。");
+        return 0;
+    }
+    if (strcmp(line, "/list") == 0) {
+        if (!g_sess_dir_ok) {
+            ca_ui_line(ui, "无法确定会话目录（缺少 HOME/APPDATA），本会话不会落盘。");
+            return 0;
+        }
+        ca_session_info infos[32];
+        size_t n = 0;
+        int rc = ca_session_list(g_sess_dir, infos, 32, &n);
+        if (rc < 0) {
+            ca_ui_printf(ui, "会话目录不可读：%s\n", g_sess_dir);
+            return 0;
+        }
+        if (n == 0) {
+            ca_ui_line(ui, "（还没有历史会话）");
+            return 0;
+        }
+        ca_ui_printf(ui, "会话（新到旧，共 %lu 个）：\n", (unsigned long)n);
+        for (size_t i = 0; i < n; i++) {
+            if (infos[i].corrupt) {
+                /* 损坏要**标出来**：悄悄不显示会让用户以为会话丢了 */
+                ca_ui_printf(ui, "  %-24s [损坏，已跳过]\n", infos[i].id);
+            } else {
+                ca_ui_printf(ui, "  %-24s %d 条消息\n", infos[i].id, infos[i].msgs);
+            }
+        }
+        return 0;
+    }
+    if (strncmp(line, "/resume", 7) == 0) {
+        const char *id = cmd_arg(line);
+        if (id == NULL) { ca_ui_line(ui, "用法：/resume <id>（id 见 /list）"); return 0; }
+        if (!g_sess_dir_ok) { ca_ui_line(ui, "会话目录不可用，无法恢复。"); return 0; }
+        /* 先保存当前会话，再切换 —— 不然用户会丢掉正在进行的对话。 */
+        save_session_quietly();
+        char path[CA_SESSION_MAX_PATH];
+        if (ca_session_path_for(g_sess_dir, id, path, sizeof(path)) != 0) {
+            ca_ui_line(ui, "无效的会话 id（id 见 /list）。");
+            return 0;
+        }
+        int rc = ca_session_load(&g_session, path);
+        if (rc == -1) {
+            /* 坏文件不该让程序退出，也不该被顺手删掉：用户可能还想自己看看。 */
+            ca_ui_line(ui, "无法恢复：该会话文件损坏或不存在（未做任何改动）。");
+            return 0;
+        }
+        if (rc == -2) {
+            ca_ui_line(ui, "该会话超出历史上限，已按轮次淘汰后恢复（最早的轮次被丢弃）。");
+        }
+        ca_ui_printf(ui, "已恢复会话 %s：%lu 条消息。\n", id,
+                     (unsigned long)ca_session_count(&g_session));
+        return 0;
+    }
+    if (strncmp(line, "/delete", 7) == 0) {
+        const char *id = cmd_arg(line);
+        if (id == NULL) { ca_ui_line(ui, "用法：/delete <id>（id 见 /list）"); return 0; }
+        if (!g_sess_dir_ok) { ca_ui_line(ui, "会话目录不可用，无法删除。"); return 0; }
+        if (ca_session_delete(g_sess_dir, id) != 0) {
+            ca_ui_printf(ui, "删除失败：%s（id 是否正确？）\n", id);
+        } else {
+            ca_ui_printf(ui, "已删除会话 %s。\n", id);
+        }
         return 0;
     }
     /* 不认识的命令**不当成对话内容**发出去：
@@ -257,6 +358,20 @@ int main(void) {
     cfg.perm = NULL;
     cfg.perm_user = NULL;
 
+    /* 会话（US-6）：预算传 0 → 用契约规定的历史上限。
+     * 拿不到会话目录不算致命：降级为「只在内存里记得」，
+     * 并在启动时如实说明，而不是假装能恢复。 */
+    if (ca_session_init(&g_session, 0) != 0) {
+        fprintf(stderr, "会话初始化失败（内存不足）。\n");
+        if (tr->cleanup != NULL) tr->cleanup();
+        ca_ui_shutdown(&ui);
+        ca_ws_free(ws);
+        return 2;
+    }
+    g_sess_dir_ok = (ca_session_dir(g_sess_dir, sizeof(g_sess_dir)) == 0 &&
+                     ca_session_dir_ensure(g_sess_dir) == 0);
+    cfg.session = &g_session;
+
     ca_core_status st = ca_core_init(&g_core, &cfg);
     if (st != CA_CORE_OK) {
         ca_ui_printf(&ui, "初始化失败：%s\n", ca_core_status_text(st));
@@ -300,8 +415,22 @@ int main(void) {
              * 早先这里只有退出码，用户看到的是「什么都没发生」。 */
             ca_ui_printf(&ui, "[%s] %s\n", ca_core_status_text(st),
                          g_core.last_error[0] != '\0' ? g_core.last_error : "无更多信息");
+        } else {
+            /* 每轮结束就落盘：崩溃/断电至多丢一轮，而不是整段对话。 */
+            save_session_quietly();
         }
     }
+
+    /* 退出时把 id 报出来，否则用户下次无从 /resume——
+     * 会话存了却没人知道它叫什么，等于没存。 */
+    save_session_quietly();
+    if (g_sess_dir_ok && g_session.id[0] != '\0') {
+        ca_ui_printf(&ui, "本次会话已保存：%s（用 /resume %s 继续，/list 查看全部）\n",
+                     g_session.id, g_session.id);
+    } else if (!g_sess_dir_ok) {
+        ca_ui_line(&ui, "会话未落盘（无法确定会话目录），退出后不保留。");
+    }
+    ca_session_free(&g_session);
 
     if (tr->cleanup != NULL) tr->cleanup();
     ca_ui_shutdown(&ui); /* 必须在任何退出路径上还原终端 */

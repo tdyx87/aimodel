@@ -8,6 +8,16 @@
  * 而本产品与它们的差异点之一就是「丢了会说」。
  */
 
+#if defined(_MSC_VER)
+#  define _CRT_SECURE_NO_WARNINGS 1
+#endif
+
+#if defined(_WIN32)
+#  define SEP_CHAR '\\'
+#else
+#  define SEP_CHAR '/'
+#endif
+
 #include "ca_test.h"
 
 #include "cagent/session.h"
@@ -15,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* 造一条 n 字节的 'x' 串 */
 static char *blob(size_t n) {
@@ -300,6 +311,179 @@ CA_TEST(session_json_to_json_rejects_small_buffer) {
     ca_session_free(&s);
 }
 
+/* ---------------------------------------------------------- 落盘 */
+
+/* 每轮用一个独立的临时目录，绝不去碰用户真实的会话目录。 */
+static void make_test_dir(char *buf, size_t cap) {
+    const char *base = getenv("TEMP");
+    if (base == NULL) base = getenv("TMPDIR");
+    if (base == NULL) base = ".";
+    snprintf(buf, cap, "%s%ccagent_sess_test_%lu",
+             base, (char)SEP_CHAR, (unsigned long)time(NULL));
+}
+
+CA_TEST(session_saves_lists_loads_and_deletes) {
+    char dir[CA_SESSION_MAX_PATH];
+    make_test_dir(dir, sizeof(dir));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 8192), 0);
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, "落盘的问题"), 0);
+    CA_ASSERT_EQ_INT(ca_session_append_delta(&s, "落盘的答案"), 0);
+    CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+    /* id 由保存时生成：调用方不该被要求先想好名字 */
+    CA_ASSERT(s.id[0] != '\0');
+
+    ca_session_info list[8];
+    size_t n = 0;
+    CA_ASSERT_EQ_INT(ca_session_list(dir, list, 8, &n), 1);
+    CA_ASSERT_EQ_INT(n, 1);
+    CA_ASSERT(strcmp(list[0].id, s.id) == 0);
+    CA_ASSERT_EQ_INT(list[0].corrupt, 0);
+    CA_ASSERT_EQ_INT(list[0].msgs, 2);
+
+    ca_session back;
+    CA_ASSERT_EQ_INT(ca_session_init(&back, 8192), 0);
+    CA_ASSERT_EQ_INT(ca_session_load(&back, list[0].path), 0);
+    CA_ASSERT_EQ_INT(ca_session_count(&back), 2);
+    CA_ASSERT(strcmp(ca_session_text(&back, 0), "落盘的问题") == 0);
+    CA_ASSERT(strcmp(ca_session_text(&back, 1), "落盘的答案") == 0);
+    /* 载入后接着问，历史必须延续——这才是 US-6「继续其中之一」 */
+    CA_ASSERT_EQ_INT(ca_session_add(&back, CA_MSG_USER, "接着问"), 0);
+    CA_ASSERT_EQ_INT(ca_session_count(&back), 3);
+
+    CA_ASSERT_EQ_INT(ca_session_delete(dir, s.id), 0);
+    CA_ASSERT_EQ_INT(ca_session_list(dir, list, 8, &n), 0);
+    CA_ASSERT_EQ_INT(n, 0);
+
+    ca_session_free(&back);
+    ca_session_free(&s);
+}
+
+CA_TEST(session_saved_file_has_no_key) {
+    char dir[CA_SESSION_MAX_PATH];
+    make_test_dir(dir, sizeof(dir));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 8192), 0);
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, "sk-do-not-persist"), 0);
+    CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+
+    char name[CA_SESSION_MAX_ID + 8];
+    snprintf(name, sizeof(name), "%s.json", s.id);
+    char path[CA_SESSION_MAX_PATH];
+    snprintf(path, sizeof(path), "%s%c%s", dir, (char)SEP_CHAR, name);
+
+    FILE *f = fopen(path, "rb");
+    CA_ASSERT(f != NULL);
+    if (f != NULL) {
+        char buf[8192];
+        size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[got] = '\0';
+        CA_ASSERT(strstr(buf, "api_key") == NULL);
+        CA_ASSERT(strstr(buf, "Authorization") == NULL);
+        CA_ASSERT(strstr(buf, "sk-do-not-persist") != NULL); /* 用户原话照存 */
+    }
+    ca_session_delete(dir, s.id);
+    ca_session_free(&s);
+}
+
+CA_TEST(session_list_sorts_newest_first) {
+    char dir[CA_SESSION_MAX_PATH];
+    make_test_dir(dir, sizeof(dir));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+
+    for (int i = 0; i < 3; i++) {
+        ca_session s;
+        CA_ASSERT_EQ_INT(ca_session_init(&s, 4096), 0);
+        char msg[32];
+        snprintf(msg, sizeof(msg), "第 %d 次", i);
+        CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, msg), 0);
+        CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+        ca_session_free(&s);
+    }
+
+    ca_session_info list[8];
+    size_t n = 0;
+    CA_ASSERT_EQ_INT(ca_session_list(dir, list, 8, &n), 3);
+    CA_ASSERT_EQ_INT(n, 3);
+    /* 断言排序不变量：时间戳不递增 */
+    for (size_t i = 1; i < n; i++) {
+        CA_ASSERT(list[i - 1].mtime >= list[i].mtime);
+    }
+    for (size_t i = 0; i < n; i++) ca_session_delete(dir, list[i].id);
+    ca_session_free(NULL); /* 空指针是安全的空操作 */
+}
+
+CA_TEST(session_corrupt_file_is_listed_not_fatal) {
+    char dir[CA_SESSION_MAX_PATH];
+    make_test_dir(dir, sizeof(dir));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+
+    /* 手写一个坏文件：截断的 JSON */
+    char bad[CA_SESSION_MAX_PATH];
+    snprintf(bad, sizeof(bad), "%s%cbad.json", dir, (char)SEP_CHAR);
+    FILE *f = fopen(bad, "wb");
+    CA_ASSERT(f != NULL);
+    if (f != NULL) {
+        fputs("{\"v\":1,\"messages\":[{\"role\":\"user\",", f);
+        fclose(f);
+    }
+
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 4096), 0);
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, "好文件"), 0);
+    CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+
+    ca_session_info list[8];
+    size_t n = 0;
+    /* 关键：坏文件不能让「列出会话」整体失败——用户的工具不该因为
+     * 一个坏文件就打不开。 */
+    CA_ASSERT_EQ_INT(ca_session_list(dir, list, 8, &n), 2);
+    CA_ASSERT_EQ_INT(n, 2);
+    int corrupt_seen = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (list[i].corrupt) {
+            corrupt_seen = 1;
+            CA_ASSERT(strcmp(list[i].id, "bad") == 0);
+            CA_ASSERT_EQ_INT(list[i].msgs, 0);
+        }
+    }
+    CA_ASSERT(corrupt_seen); /* 必须**被标出来**，而不是悄悄消失 */
+
+    ca_session bad_sess;
+    CA_ASSERT_EQ_INT(ca_session_init(&bad_sess, 4096), 0);
+    CA_ASSERT_EQ_INT(ca_session_load(&bad_sess, bad), -1);
+    CA_ASSERT_EQ_INT(ca_session_count(&bad_sess), 0);
+
+    ca_session_delete(dir, s.id);
+    remove(bad);
+    ca_session_free(&bad_sess);
+    ca_session_free(&s);
+}
+
+CA_TEST(session_delete_refuses_path_traversal) {
+    char dir[CA_SESSION_MAX_PATH];
+    make_test_dir(dir, sizeof(dir));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+    /* id 由 main 透传进来，必须挡住越出会话目录的写法 */
+    CA_ASSERT_EQ_INT(ca_session_delete(dir, ".."), -1);
+    CA_ASSERT_EQ_INT(ca_session_delete(dir, "../evil"), -1);
+    CA_ASSERT_EQ_INT(ca_session_delete(dir, ""), -1);
+}
+
+CA_TEST(session_dir_is_under_user_config) {
+    char dir[CA_SESSION_MAX_PATH];
+    CA_ASSERT_EQ_INT(ca_session_dir(dir, sizeof(dir)), 0);
+    /* 会话不该写进工作区：写进工作区就会被提交、被误删、
+     * 也会污染用户的仓库。 */
+    CA_ASSERT(strstr(dir, "cagent") != NULL);
+    CA_ASSERT(strstr(dir, "sessions") != NULL);
+}
+
 int main(void) {
     struct {
         const char *name;
@@ -318,6 +502,12 @@ int main(void) {
         {"session_json_load_evicts_when_over_budget", ca_test_run_session_json_load_evicts_when_over_budget},
         {"session_json_load_truncates_oversized_message", ca_test_run_session_json_load_truncates_oversized_message},
         {"session_json_to_json_rejects_small_buffer", ca_test_run_session_json_to_json_rejects_small_buffer},
+        {"session_saves_lists_loads_and_deletes", ca_test_run_session_saves_lists_loads_and_deletes},
+        {"session_saved_file_has_no_key", ca_test_run_session_saved_file_has_no_key},
+        {"session_list_sorts_newest_first", ca_test_run_session_list_sorts_newest_first},
+        {"session_corrupt_file_is_listed_not_fatal", ca_test_run_session_corrupt_file_is_listed_not_fatal},
+        {"session_delete_refuses_path_traversal", ca_test_run_session_delete_refuses_path_traversal},
+        {"session_dir_is_under_user_config", ca_test_run_session_dir_is_under_user_config},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         ca_test_begin(cases[i].name);

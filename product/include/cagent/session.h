@@ -37,6 +37,7 @@ extern "C" {
 #define CA_SESSION_MAX_MSGS 512
 
 #define CA_SESSION_MAX_ID 64
+#define CA_SESSION_MAX_PATH 1024
 
 typedef struct {
     unsigned role;  /* ca_msg_role */
@@ -105,6 +106,50 @@ int ca_session_to_json(const ca_session *s, char *buf, size_t cap,
 /* 从 JSON 反序列化。返回 0 成功；-1 内容损坏（调用方应跳过并提示，
  * **不得**因此中止启动）；-2 文件超出预算（已按淘汰规则截断后仍载入）。 */
 int ca_session_from_json(ca_session *s, const char *text, size_t len);
+
+/* ---------------------------------------------------------------- 落盘
+ *
+ * 平台差异（配置目录在哪、怎么建目录、怎么遍历目录、怎么取修改时间）
+ * **全部**关在当前文件对应的 session_store.c 里，不泄漏到这里，
+ * 也不泄漏进 core（契约 §8：平台差异不得进入业务逻辑）。
+ */
+
+/* 会话目录：用户配置目录下的 cagent/sessions。
+ * Windows 用 %APPDATA%，POSIX 用 $XDG_CONFIG_HOME 或 $HOME/.config。
+ * 返回 0 成功。 */
+int ca_session_dir(char *buf, size_t cap);
+
+/* 确保目录存在（必要时逐级创建）。0 成功。 */
+int ca_session_dir_ensure(const char *dir);
+
+/* 保存为 <dir>/<id>.json。id 为空时自动生成（时间 + 序号）。
+ * 实际使用的 id 会写回 s->id。返回 0 成功。 */
+int ca_session_save(ca_session *s, const char *dir);
+
+/* 从文件载入。返回 0 成功；-1 打不开或内容损坏；-2 超出预算已截断。 */
+int ca_session_load(ca_session *s, const char *path);
+
+/* 拼出 <dir>/<id>.json 的路径。
+ * 让调用方不必知道路径分隔符是 '\' 还是 '/'（契约 §8）。 */
+int ca_session_path_for(const char *dir, const char *id, char *buf, size_t cap);
+
+typedef struct {
+    char id[CA_SESSION_MAX_ID];
+    char path[CA_SESSION_MAX_PATH];
+    long long mtime;   /* 修改时间（秒），用于排序 */
+    long long bytes;   /* 文件字节数 */
+    int msgs;          /* 消息条数；损坏文件为 0 */
+    int corrupt;       /* 内容读不通 —— 列表里保留并标注，不静默丢弃 */
+} ca_session_info;
+
+/* 扫描目录，按修改时间**从新到旧**排序写入 out。
+ * 返回写入的条数；-1 目录不可读。
+ * 损坏的文件**不**导致失败：它会被标 corrupt=1 并照常列出。 */
+int ca_session_list(const char *dir, ca_session_info *out, size_t cap,
+                    size_t *count);
+
+/* 删除 <dir>/<id>.json。返回 0 成功。 */
+int ca_session_delete(const char *dir, const char *id);
 
 #ifdef __cplusplus
 }

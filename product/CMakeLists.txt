@@ -71,7 +71,7 @@ target_link_libraries(cagent_json PUBLIC cagent_buf)
 
 # ---- session：会话历史（契约 §6） ----
 # 历史是本产品里唯一随对话增长的东西，所以它的上限必须长在结构里。
-add_library(cagent_session STATIC src/session.c)
+add_library(cagent_session STATIC src/session.c src/session_store.c)
 target_link_libraries(cagent_session PUBLIC cagent_json cagent_mem)
 
 # ---- tools：工具层（契约 §5，含路径安全与权限模型） ----
