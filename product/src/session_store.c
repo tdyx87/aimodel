@@ -188,6 +188,12 @@ int ca_session_save(ca_session *s, const char *dir) {
         remove(tmp);
         return -1;
     }
+#if !defined(_WIN32)
+    /* 会话是用户的私人对话，默认权限（0666 & ~umask，通常 0644）意味着
+     * 同一台机器上的其他用户也能读。收成 0600。
+     * Windows 侧不需要：%APPDATA% 本身就已经是「只限本用户」的。 */
+    (void)chmod(tmp, 0600);
+#endif
     if (rename(tmp, path) != 0) {
         remove(tmp);
         return -1;

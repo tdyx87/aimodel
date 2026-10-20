@@ -27,6 +27,10 @@
 #include <string.h>
 #include <time.h>
 
+#if !defined(_WIN32)
+#  include <sys/stat.h>
+#endif
+
 /* 造一条 n 字节的 'x' 串 */
 static char *blob(size_t n) {
     char *p = (char *)malloc(n + 1);
@@ -563,6 +567,30 @@ CA_TEST(session_save_does_not_follow_traversal_id) {
     ca_session_free(&s);
 }
 
+#if !defined(_WIN32)
+/* 私人对话不该让同机其他用户读到。只在 POSIX 上断言：
+ * Windows 侧靠 %APPDATA% 的 ACL，不是文件 mode。 */
+CA_TEST(session_file_is_not_world_readable) {
+    char dir[CA_SESSION_MAX_PATH];
+    make_test_dir(dir, sizeof(dir));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 4096), 0);
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, "私人内容"), 0);
+    CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+
+    char path[CA_SESSION_MAX_PATH];
+    CA_ASSERT_EQ_INT(ca_session_path_for(dir, s.id, path, sizeof(path)), 0);
+    struct stat st;
+    CA_ASSERT_EQ_INT(stat(path, &st), 0);
+    CA_ASSERT((st.st_mode & (S_IRGRP | S_IROTH)) == 0);
+
+    ca_session_delete(dir, s.id);
+    ca_session_free(&s);
+}
+#endif
+
 int main(void) {
     struct {
         const char *name;
@@ -589,6 +617,9 @@ int main(void) {
         {"session_dir_is_under_user_config", ca_test_run_session_dir_is_under_user_config},
         {"session_append_delta_respects_cap_at_tail", ca_test_run_session_append_delta_respects_cap_at_tail},
         {"session_save_does_not_follow_traversal_id", ca_test_run_session_save_does_not_follow_traversal_id},
+#if !defined(_WIN32)
+        {"session_file_is_not_world_readable", ca_test_run_session_file_is_not_world_readable},
+#endif
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         ca_test_begin(cases[i].name);
