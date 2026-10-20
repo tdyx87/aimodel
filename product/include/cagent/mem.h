@@ -42,7 +42,17 @@ int ca_rss_over(int64_t limit_bytes);
 #define CA_LIMIT_TOOL_RESULT_BYTES (1u * 1024u * 1024u) /* 工具结果 1 MB */
 #define CA_LIMIT_HISTORY_BYTES (4u * 1024u * 1024u)     /* 会话历史 4 MB */
 #define CA_LIMIT_FILE_READ_BYTES (4u * 1024u * 1024u)   /* 文件读入 4 MB */
-#define CA_LIMIT_RSS_BYTES (32LL * 1024LL * 1024LL)     /* RSS 硬上限 32 MB */
+
+/* 进程 RSS 硬上限 100 MB（PRD NFR-1）。
+ *
+ * **2026-10-19 由 32 MB 改为 100 MB**（ADR-0003）。原值把 libcurl 的
+ * 常驻成本当成 0 —— 实测 dlopen + curl_global_init 就要 6.04 MB，
+ * 32 MB 的上限在任何真实配置下都达不成。
+ *
+ * 注意：**只有这一个数字放宽了**。上面几行的分层预算没有跟着变，
+ * 因为它们约束的是「单次操作不得吃掉整个池」，与池子总大小无关。
+ */
+#define CA_LIMIT_RSS_BYTES (100LL * 1024LL * 1024LL)
 
 /* ---- arena 分配器 ----
  *

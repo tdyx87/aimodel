@@ -28,7 +28,7 @@
 #include "cagent/ui.h"
 
 #ifdef __cplusplus
-extern extern "C" {
+extern "C" {
 #endif
 
 /* 单次用户输入内，工具执行与回灌的**最大轮次**。

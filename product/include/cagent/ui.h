@@ -22,7 +22,7 @@
 #include <stddef.h>
 
 #ifdef __cplusplus
-extern extern "C" {
+extern "C" {
 #endif
 
 /* ---- 输出端（由 ca_term_* 提供；测试可注入自定义实现）----

@@ -6,6 +6,16 @@ project(cagent C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+# **关掉编译器扩展**。默认是 ON，即实际编译的是 -std=gnu99 ——
+# glibc 会通过 _DEFAULT_SOURCE 额外暴露 realpath / kill 等 POSIX 函数，
+# 少一个头文件也不报错（只会退化成隐式声明，返回 int，64 位指针被截断）。
+# 关掉之后 `-std=c99` 是真的：用 POSIX 就得自己声明依赖。
+set(CMAKE_C_EXTENSIONS OFF)
+# POSIX 侧显式声明所需标准版本。realpath / fork / pipe / kill 都在其中。
+# 这比依赖编译器「顺手给的」更可预测，也说明了这些函数为什么可用。
+if(NOT WIN32)
+    add_compile_definitions(_POSIX_C_SOURCE=200809L)
+endif()
 
 option(CAGENT_BUILD_TESTS "构建单元测试" ON)
 
