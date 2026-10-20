@@ -371,10 +371,11 @@ CA_TEST(session_saved_file_has_no_key) {
     CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, "sk-do-not-persist"), 0);
     CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
 
-    char name[CA_SESSION_MAX_ID + 8];
-    snprintf(name, sizeof(name), "%s.json", s.id);
+    /* 用产品自己的路径拼接，而不是在测试里再拼一次：
+     * 手写 "%s%c%s" 时 GCC 的 -Wformat-truncation 会（在这个已知长度的
+     * 局部数组上）算不出结果一定放得下而告警，而零告警是硬门禁。 */
     char path[CA_SESSION_MAX_PATH];
-    snprintf(path, sizeof(path), "%s%c%s", dir, (char)SEP_CHAR, name);
+    CA_ASSERT_EQ_INT(ca_session_path_for(dir, s.id, path, sizeof(path)), 0);
 
     FILE *f = fopen(path, "rb");
     CA_ASSERT(f != NULL);
@@ -423,9 +424,9 @@ CA_TEST(session_corrupt_file_is_listed_not_fatal) {
     make_test_dir(dir, sizeof(dir));
     CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
 
-    /* 手写一个坏文件：截断的 JSON */
+    /* 手写一个坏文件：截断的 JSON（路径同样交给产品去拼，见上） */
     char bad[CA_SESSION_MAX_PATH];
-    snprintf(bad, sizeof(bad), "%s%cbad.json", dir, (char)SEP_CHAR);
+    CA_ASSERT_EQ_INT(ca_session_path_for(dir, "bad", bad, sizeof(bad)), 0);
     FILE *f = fopen(bad, "wb");
     CA_ASSERT(f != NULL);
     if (f != NULL) {
