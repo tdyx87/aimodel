@@ -534,8 +534,10 @@ CA_TEST(session_save_does_not_follow_traversal_id) {
      * 先删掉同名残留（可能是历史上某次带 bug 的运行留下的，
      * 它们都在临时目录内，属于本测试自己的产物），否则断言会被
      * 旧残留误判成「本次越界」。 */
-    char escape1[CA_SESSION_MAX_PATH];
-    char escape2[CA_SESSION_MAX_PATH];
+    /* 比 dir 大一截，这样编译期就能证明 "%s%c..%cpwned.json" 一定放得下：
+     * 两个同尺寸局部数组的 snprintf 会触发 GCC -Wformat-truncation。 */
+    char escape1[CA_SESSION_MAX_PATH + 64];
+    char escape2[CA_SESSION_MAX_PATH + 64];
     snprintf(escape1, sizeof(escape1), "%s%c..%cpwned.json", dir, (char)SEP_CHAR,
              (char)SEP_CHAR);
     snprintf(escape2, sizeof(escape2), "%s%c..%c..%cpwned.json", dir,
