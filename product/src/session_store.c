@@ -53,6 +53,12 @@
 #define CA_SESSION_FILE_MAX CA_LIMIT_HISTORY_BYTES
 #define CA_SESSION_SUFFIX ".json"
 
+/* MSVC 的 <sys/stat.h> 只给 S_IFDIR/S_IFMT，不给 S_ISDIR 这个宏
+ * （POSIX 两种都有）。与其在调用处写 #ifdef，不如补齐一次。 */
+#if !defined(S_ISDIR)
+#  define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#endif
+
 static int path_join(char *buf, size_t cap, const char *dir, const char *name) {
     if (buf == NULL || dir == NULL || name == NULL) return -1;
     int n = snprintf(buf, cap, "%s%c%s", dir, CA_SEP, name);
@@ -110,9 +116,11 @@ int ca_session_dir_ensure(const char *dir) {
         *p = save;
     }
     if (CA_MKDIR(work) != 0) {
-        /* 已存在也算成功：并发或重复调用都应幂等。 */
+        /* 已存在也算成功：并发或重复调用都应幂等。
+         * 用 S_ISDIR 而不是 S_IFDIR——后者要 _DEFAULT_SOURCE，
+         * 在 CI 的 Linux 上（严格 C99 + 无扩展宏）根本不存在。 */
         struct stat st;
-        if (stat(work, &st) != 0 || !(st.st_mode & S_IFDIR)) return -1;
+        if (stat(work, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
     }
     return 0;
 }
@@ -247,15 +255,6 @@ typedef struct {
     long long mtime;
     long long bytes;
 } store_ent;
-
-/* 取文件修改时间与大小。失败返回 -1。 */
-static int file_times(const char *path, long long *mtime, long long *bytes) {
-    struct stat st;
-    if (stat(path, &st) != 0) return -1;
-    *mtime = (long long)st.st_mtime;
-    *bytes = (long long)st.st_size;
-    return 0;
-}
 
 static int has_json_suffix(const char *name) {
     size_t n = strlen(name);
