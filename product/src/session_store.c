@@ -149,25 +149,34 @@ int ca_session_save(ca_session *s, const char *dir) {
     if (doc == NULL) return -1;
     if (ca_session_to_json(s, doc, need, NULL) != 0) { free(doc); return -1; }
 
-    char name[CA_SESSION_MAX_ID + 8];
-    snprintf(name, sizeof(name), "%s%s", s->id, CA_SESSION_SUFFIX);
+    /* id 可能来自**已载入的文件**（`/resume` 之后又保存），因此它是
+     * 外部输入：一个 id 为 "../../pwned" 的文件会让保存把数据写到
+     * 会话目录之外。校验不过就丢弃它、另起一个新 id，而不是让保存失败——
+     * 用户的对话不该因为文件名可疑就丢掉。
+     *
+     * 注意这里全程走 ca_session_path_for：路径拼装的校验只有一处，
+     * 不在调用点各写一遍。 */
     char path[CA_SESSION_MAX_PATH];
-    char tmp[CA_SESSION_MAX_PATH];
-    if (path_join(path, sizeof(path), dir, name) != 0 ||
-        path_join(tmp, sizeof(tmp), dir, name) != 0) {
-        free(doc);
-        return -1;
+    if (ca_session_path_for(dir, s->id, path, sizeof(path)) != 0) {
+        make_id(s->id, sizeof(s->id));
+        if (ca_session_path_for(dir, s->id, path, sizeof(path)) != 0) {
+            free(doc);
+            return -1;
+        }
     }
 
     /* 临时名 + 改名：中途失败留下的临时文件，不会顶掉一份好的会话。
-     * 直接写目标文件的话，写坏时用户的会话就没了。 */
-    size_t tmp_len = strlen(tmp);
-    if (tmp_len + 5 < sizeof(tmp)) {
-        memcpy(tmp + tmp_len, ".tmp", 5);
-    } else {
+     * 直接写目标文件的话，写坏时用户的会话就没了。
+     * 手工拼接而不是 snprintf("%s.tmp")：GCC 的 -Wformat-truncation
+     * 看到两个同尺寸的局部数组就会告警，而零告警是硬门禁。 */
+    char tmp[CA_SESSION_MAX_PATH];
+    size_t plen = strlen(path);
+    if (plen + 5 > sizeof(tmp)) {
         free(doc);
         return -1;
     }
+    memcpy(tmp, path, plen);
+    memcpy(tmp + plen, ".tmp", 5);
 
     FILE *f = fopen(tmp, "wb");
     if (f == NULL) { free(doc); return -1; }

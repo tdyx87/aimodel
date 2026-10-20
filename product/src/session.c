@@ -166,8 +166,12 @@ int ca_session_append_delta(ca_session *s, const char *text) {
     session_make_room(s, n, 1);
 
     size_t keep = n;
-    if (tail + n > s->cap) {
-        keep = (s->cap > tail) ? (s->cap - tail) : 0;
+    /* 必须给结尾的 NUL 留一格：本条的存储是 [off, tail+keep] 含 NUL，
+     * 于是 keep <= cap - tail - 1。少减这个 1，NUL 会写到 buf[cap] 上
+     * （越界 1 字节），且 used 会变成 cap+1 —— 破坏 used<=cap，
+     * 而症状只是静默的堆损坏。 */
+    if (tail + n + 1 > s->cap) {
+        keep = (s->cap > tail + 1) ? (s->cap - tail - 1) : 0;
         s->last_truncated_msgs += 1;
         s->last_truncated_bytes += n - keep;
     }

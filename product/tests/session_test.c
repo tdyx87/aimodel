@@ -485,6 +485,82 @@ CA_TEST(session_dir_is_under_user_config) {
     CA_ASSERT(strstr(dir, "sessions") != NULL);
 }
 
+/* 续写刚好落在容量边界上时，NUL 不能被写到 buf[cap]。
+ * 这个位置以前会越界写 1 字节，并把 used 顶到 cap+1 —— 破坏
+ * 「used <= cap」这条核心不变量，而 it 只表现为静默的堆损坏。 */
+CA_TEST(session_append_delta_respects_cap_at_tail) {
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 1024), 0);
+    char a[1001];
+    char b[21];
+    char c[11];
+    memset(a, 'A', 1000);
+    a[1000] = '\0';
+    memset(b, 'B', 20);
+    b[20] = '\0';
+    memset(c, 'C', 10);
+    c[10] = '\0';
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, a), 0);
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_ASSISTANT, b), 0);
+    CA_ASSERT_EQ_INT(ca_session_append_delta(&s, c), 0);
+    CA_ASSERT(s.used <= s.cap);
+    ca_session_free(&s);
+}
+
+/* id 来自文件内容，而文件是外部输入：一个 id 为 "../../pwned" 的会话
+ * 文件，保存时不能把我们的数据写到会话目录之外。 */
+CA_TEST(session_save_does_not_follow_traversal_id) {
+    char dir[CA_SESSION_MAX_PATH];
+    make_test_dir(dir, sizeof(dir));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+
+    char crafted[CA_SESSION_MAX_PATH];
+    CA_ASSERT_EQ_INT(ca_session_path_for(dir, "evil", crafted, sizeof(crafted)), 0);
+    FILE *f = fopen(crafted, "wb");
+    CA_ASSERT(f != NULL);
+    if (f != NULL) {
+        const char *body =
+            "{\"v\":1,\"id\":\"../../pwned\",\"messages\":"
+            "[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        fputs(body, f);
+        fclose(f);
+    }
+
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 8192), 0);
+    CA_ASSERT_EQ_INT(ca_session_load(&s, crafted), 0);
+
+    /* 越界写入若发生，就会在这两个位置留下文件。
+     * 先删掉同名残留（可能是历史上某次带 bug 的运行留下的，
+     * 它们都在临时目录内，属于本测试自己的产物），否则断言会被
+     * 旧残留误判成「本次越界」。 */
+    char escape1[CA_SESSION_MAX_PATH];
+    char escape2[CA_SESSION_MAX_PATH];
+    snprintf(escape1, sizeof(escape1), "%s%c..%cpwned.json", dir, (char)SEP_CHAR,
+             (char)SEP_CHAR);
+    snprintf(escape2, sizeof(escape2), "%s%c..%c..%cpwned.json", dir,
+             (char)SEP_CHAR, (char)SEP_CHAR, (char)SEP_CHAR);
+    remove(escape1);
+    remove(escape2);
+
+    CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+
+    /* id 要么被校验拒绝后换成新生成的，要么本就不含危险字符 */
+    CA_ASSERT(strstr(s.id, "..") == NULL);
+    CA_ASSERT(strchr(s.id, '/') == NULL);
+
+    FILE *probe = fopen(escape1, "rb");
+    CA_ASSERT(probe == NULL);
+    if (probe != NULL) fclose(probe);
+    probe = fopen(escape2, "rb");
+    CA_ASSERT(probe == NULL);
+    if (probe != NULL) fclose(probe);
+
+    ca_session_delete(dir, "evil");
+    ca_session_delete(dir, s.id);
+    ca_session_free(&s);
+}
+
 int main(void) {
     struct {
         const char *name;
@@ -509,6 +585,8 @@ int main(void) {
         {"session_corrupt_file_is_listed_not_fatal", ca_test_run_session_corrupt_file_is_listed_not_fatal},
         {"session_delete_refuses_path_traversal", ca_test_run_session_delete_refuses_path_traversal},
         {"session_dir_is_under_user_config", ca_test_run_session_dir_is_under_user_config},
+        {"session_append_delta_respects_cap_at_tail", ca_test_run_session_append_delta_respects_cap_at_tail},
+        {"session_save_does_not_follow_traversal_id", ca_test_run_session_save_does_not_follow_traversal_id},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         ca_test_begin(cases[i].name);
