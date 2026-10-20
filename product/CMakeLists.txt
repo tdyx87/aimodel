@@ -141,9 +141,19 @@ if (CAGENT_BUILD_TESTS)
     add_test(NAME http_test COMMAND http_test)
     add_test(NAME json_test COMMAND json_test)
     add_test(NAME llm_test COMMAND llm_test)
+    add_test(NAME tools_test COMMAND tools_test)
+
     add_executable(core_test tests/core_test.c)
     target_link_libraries(core_test PRIVATE ca_test cagent_core)
 
     add_test(NAME core_test COMMAND core_test)
-    add_test(NAME tools_test COMMAND tools_test)
 endif()
+
+# ---- 可执行入口 ----
+# main 刻意薄：配置解析 + 读一行 + 交给 core。
+# 它不属于测试构建，所以放在 CAGENT_BUILD_TESTS 之外。
+add_executable(cagent src/main.c)
+target_link_libraries(cagent PRIVATE cagent_core)
+# cagent_core 是静态库，其依赖（ui/llm/tools/json/sse）以 PUBLIC 标注，
+# 因此这里不必重复列出。若漏标 PUBLIC，问题只会在链接期暴露，
+# 而且报错指向的是一个很远的符号名，不容易联想到缺了哪一行。

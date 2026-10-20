@@ -70,6 +70,29 @@ ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
         memcpy(c->system_buf, cfg->system, sn + 1);
         c->cfg.system = c->system_buf;
     }
+
+    /* 鉴权头在 init 时拼好：key 不会变，没必要每轮重拼。
+     *
+     * 这里**只做长度检查，不做任何形式化校验**——key 的格式由服务商定义，
+     * 我们猜测它合法与否只会误伤。
+     *
+     * 注意计算的是整个 "Authorization: Bearer <key>" 的长度，
+     * 而不是 key 单独的长度：前缀本身占 22 字节，只查 key 会算漏。
+     */
+    c->auth_header[0] = '\0';
+    if (cfg->api_key != NULL && cfg->api_key[0] != '\0') {
+        size_t kn = strlen(cfg->api_key);
+        if (kn > CA_CORE_MAX_KEY_BYTES) {
+            core_note(c, "API key 过长");
+            return CA_CORE_ERR_ARGS;
+        }
+        int an = snprintf(c->auth_header, sizeof(c->auth_header),
+                          "Authorization: Bearer %s", cfg->api_key);
+        if (an <= 0 || (size_t)an >= sizeof(c->auth_header)) {
+            core_note(c, "API key 过长");
+            return CA_CORE_ERR_ARGS;
+        }
+    }
     return CA_CORE_OK;
 }
 
@@ -157,11 +180,19 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text) {
         return CA_CORE_ERR_LIMIT;
     }
 
-    static const char *const headers[] = {
-        "Content-Type: application/json",
-        "Accept: text/event-stream",
-        NULL, NULL
-    };
+    /* 鉴权头由 init 拼好，可能为空。
+     * 空时把这一项写成 NULL —— 传输层按「遇到 NULL 即结束」遍历，
+     * 所以它必须排在最后。
+     *
+     * 逐项赋值而不是写成一个初始化列表：列表里含 `c->auth_header`
+     * 这样的非常量表达式时，MSVC 在 C 模式下报 C4204
+     * （「使用了非标准扩展：非常量聚合初始化」）。
+     * 末尾的转换是安全的：接口声明为只读，传进去不会被修改。 */
+    const char *hdr[4];
+    hdr[0] = "Content-Type: application/json";
+    hdr[1] = "Accept: text/event-stream";
+    hdr[2] = (c->auth_header[0] != '\0') ? c->auth_header : NULL;
+    hdr[3] = NULL;
 
     ca_llm *llm = ca_llm_create();
     if (llm == NULL) return CA_CORE_ERR_NOMEM;
@@ -179,7 +210,7 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text) {
     hreq.url = c->url;
     hreq.body = body;
     hreq.body_len = strlen(body);
-    hreq.headers = headers;
+    hreq.headers = (const char *const *)hdr;
 
     ca_http_status hs = c->cfg.transport->run(&hreq, on_data, &t);
 

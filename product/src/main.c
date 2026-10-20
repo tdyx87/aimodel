@@ -1,0 +1,310 @@
+/* main.c —— 可执行入口（PRD US-1 / US-7）
+ *
+ * 这一层刻意薄：**配置解析 + 读一行 + 交给 core**。
+ * 业务逻辑一概不在这里 —— 一旦 main 里出现「判断要不要批准」
+ * 或「怎么拼请求」，那些逻辑就再也测不到了。
+ *
+ * 配置取自环境变量：
+ *   CAGENT_API_BASE  必填，例如 https://api.example.com/v1
+ *   CAGENT_MODEL     必填，服务端模型名
+ *   CAGENT_API_KEY   可选（本地无鉴权服务可不填）
+ *   CAGENT_SYSTEM    可选，系统提示
+ *
+ * 密钥只存在于进程内存：**不打印、不落盘**（PRD NFR-3）。
+ */
+#if defined(_MSC_VER)
+#  define _CRT_SECURE_NO_WARNINGS 1
+#endif
+
+#include "cagent/core.h"
+#include "cagent/http.h"
+#include "cagent/mem.h"
+#include "cagent/tools.h"
+#include "cagent/transport_mem.h"
+#include "cagent/ui.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_WIN32)
+#  include <direct.h>
+#  define ca_getcwd _getcwd
+#else
+#  include <unistd.h>
+#  define ca_getcwd getcwd
+#endif
+
+#define CA_MAIN_INPUT_MAX 4096
+#define CA_MAIN_CWD_MAX 4096
+
+/* ca_core 内含 1 MB tool_out + 256 KB results。
+ * **放在栈上会直接爆栈**（core_test 曾因这个崩溃），必须是静态存储。 */
+static ca_core g_core;
+
+static const char *k_banner =
+    "cagent —— 低内存终端代理（C99）\n"
+    "输入 /help 查看命令，/exit 退出。\n";
+
+static void print_usage(FILE *f) {
+    fprintf(f,
+            "用法：设置环境变量后直接运行 cagent\n"
+            "\n"
+            "  CAGENT_API_BASE   必填，服务地址，如 https://api.example.com/v1\n"
+            "  CAGENT_MODEL      必填，模型名\n"
+            "  CAGENT_API_KEY    可选，鉴权用；不填则不发送 Authorization\n"
+            "  CAGENT_SYSTEM     可选，系统提示\n"
+            "\n"
+            "示例（PowerShell）：\n"
+            "  $env:CAGENT_API_BASE=\"https://api.example.com/v1\"\n"
+            "  $env:CAGENT_MODEL=\"your-model\"\n"
+            "  $env:CAGENT_API_KEY=\"sk-...\"\n"
+            "  .\\cagent\n");
+}
+
+/* ---- 内置命令 ---- */
+
+static void print_mem(ca_ui *ui, const char *transport_name) {
+    int64_t cur = ca_rss_bytes();
+    int64_t peak = ca_peak_rss_bytes();
+    /* US-7：给**具体数字**而不是「大约几十兆」。
+     * 取不到就明说取不到 —— 编一个数字比不报更糟。 */
+    if (cur < 0) {
+        ca_ui_line(ui, "当前 RSS：无法获取（该平台未提供）");
+    } else {
+        ca_ui_printf(ui, "当前 RSS：%.2f MB\n", (double)cur / 1048576.0);
+    }
+    if (peak < 0) {
+        ca_ui_line(ui, "峰值 RSS：无法获取（该平台未提供）");
+    } else {
+        ca_ui_printf(ui, "峰值 RSS：%.2f MB\n", (double)peak / 1048576.0);
+    }
+    /* 报告**实际在用**的后端，而不是编译期默认值：
+     * 离线自检时 ca_transport_name() 仍返回 "none"，
+     * 照抄它会让 /mem 显示一个与事实不符的后端名。 */
+    ca_ui_printf(ui, "传输后端：%s\n", transport_name);
+}
+
+/* 返回 1 表示要求退出。 */
+static int run_command(ca_ui *ui, const char *line, const char *transport_name) {
+    if (strcmp(line, "/exit") == 0 || strcmp(line, "/quit") == 0) return 1;
+    if (strcmp(line, "/help") == 0) {
+        ca_ui_line(ui, "命令：");
+        ca_ui_line(ui, "  /help   显示本帮助");
+        ca_ui_line(ui, "  /mem    显示当前与峰值 RSS");
+        ca_ui_line(ui, "  /exit   退出");
+        return 0;
+    }
+    if (strcmp(line, "/mem") == 0) {
+        print_mem(ui, transport_name);
+        return 0;
+    }
+    /* 不认识的命令**不当成对话内容**发出去：
+     * 那会让模型去回答一个用户本来只想打命令的问题。 */
+    ca_ui_printf(ui, "未知命令：%s（/help 查看可用命令）\n", line);
+    return 0;
+}
+
+/* ---- 读取一行 ----
+ *
+ * 不用 fgets：ui 在 TTY 下已进入原始模式（关掉行缓冲与回显），
+ * fgets 会一直阻塞到换行且用户看不到自己打的字。
+ * 这里按字节读自己回显，两条路径（TTY / 管道）行为一致，
+ * 于是同一套代码在 CI 的管道里也能跑。
+ *
+ * 返回：1 取到一行；0 EOF；-1 行过长；-2 用户中断（Ctrl-C）。
+ */
+static int read_line(ca_ui *ui, char *buf, size_t cap, size_t *out_len) {
+    size_t n = 0;
+    int too_long = 0;
+    *out_len = 0;
+    if (buf == NULL || cap == 0) return -1;
+
+    for (;;) {
+        int c = (ui->in.read_byte != NULL) ? ui->in.read_byte(ui->in.self) : -1;
+
+        if (c < 0) {
+            /* EOF：已输入的内容仍算一行（管道最后一行常没有换行）。 */
+            if (too_long) return -1;
+            if (n == 0) return 0;
+            buf[n] = '\0';
+            *out_len = n;
+            return 1;
+        }
+        if (c == 3) { /* Ctrl-C */
+            if (ui->is_tty) ca_ui_printf(ui, "\n");
+            return -2;
+        }
+        if (c == '\n' || c == '\r') {
+            if (ui->is_tty) ca_ui_printf(ui, "\n");
+            if (too_long) return -1;
+            buf[n] = '\0';
+            *out_len = n;
+            return 1;
+        }
+        if (c == 127 || c == 8) { /* Backspace */
+            if (n > 0) {
+                n--;
+                if (ui->is_tty) ca_ui_printf(ui, "\b \b");
+            }
+            continue;
+        }
+        if (c == 4) { /* Ctrl-D：行首表示 EOF，行内忽略 */
+            if (n == 0) return 0;
+            continue;
+        }
+        if (too_long) continue; /* 丢弃剩余部分，直到换行 */
+
+        if (n + 1 >= cap) {
+            /* 超长**不截断**：截断后发出去是一句用户没说过的半句话。 */
+            too_long = 1;
+            continue;
+        }
+        buf[n++] = (char)c;
+        if (ui->is_tty) ca_ui_printf(ui, "%c", c);
+    }
+}
+
+/* ---- 入口 ---- */
+
+int main(void) {
+    const char *base = getenv("CAGENT_API_BASE");
+    const char *model = getenv("CAGENT_MODEL");
+    const char *key = getenv("CAGENT_API_KEY");
+    const char *sys = getenv("CAGENT_SYSTEM");
+    const char *transport_env = getenv("CAGENT_TRANSPORT");
+
+    if (base == NULL || base[0] == '\0' || model == NULL || model[0] == '\0') {
+        print_usage(stderr);
+        return 2;
+    }
+
+    /* 离线自检模式（CAGENT_TRANSPORT=mem）：
+     * 用预设的 SSE 走完整链路（sse → llm → core → ui），不联网。
+     *
+     * 存在的理由不是「方便」：
+     *   1. US-1/US-2 的端到端行为需要**可重复**的验证，
+     *      真实服务给什么内容不受控，测不了「逐字上屏」这类性质；
+     *   2. 没有 libcurl 开发包的机器也能确认这个二进制是好的，
+     *      而不是只能看到一个「无法联网」的退出码。
+     * 它**不是**假装联网：界面会明确标注当前是离线模式。 */
+    const ca_transport_ops *tr = NULL;
+    int offline = 0;
+    if (transport_env != NULL && strcmp(transport_env, "mem") == 0) {
+        static const char canned[] =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"（离线自检模式：\"}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"本构建未联网，这是预设回复。）\"}}]}\n\n"
+            "data: [DONE]\n\n";
+        ca_mem_transport_set_payload((const unsigned char *)canned,
+                                     sizeof(canned) - 1, 200);
+        tr = ca_transport_mem();
+        offline = 1;
+    } else {
+        tr = ca_transport_default();
+        if (tr == NULL) {
+            /* 如实说：这不是配置问题，是这个二进制没法联网。
+             * 含糊地说「连接失败」会让人去查网络，而问题在构建。
+             * 同时给出**能立刻用**的替代：离线自检模式。 */
+            fprintf(stderr,
+                    "本构建未链接 libcurl，无法发起真实请求。\n"
+                    "请在有 libcurl 开发包的环境下构建（CI 三平台均已覆盖），\n"
+                    "或设置 CAGENT_TRANSPORT=mem 以离线自检模式运行（不发网络请求）。\n");
+            return 3;
+        }
+    }
+
+    char cwd[CA_MAIN_CWD_MAX];
+    if (ca_getcwd(cwd, sizeof(cwd)) == NULL) {
+        fprintf(stderr, "无法取得当前目录，工具的工作区无从确定。\n");
+        return 4;
+    }
+
+    ca_workspace *ws = ca_ws_open(cwd);
+    if (ws == NULL) {
+        fprintf(stderr, "无法打开工作区：%s\n", cwd);
+        return 4;
+    }
+
+    ca_ui ui;
+    ca_ui_sink sink;
+    ca_ui_src src;
+    ca_term_default_sink(&sink);
+    ca_term_default_src(&src);
+    if (ca_ui_init(&ui, sink, src) != 0) {
+        fprintf(stderr, "界面初始化失败。\n");
+        ca_ws_free(ws);
+        return 5;
+    }
+
+    if (tr->init != NULL && tr->init() != 0) {
+        ca_ui_line(&ui, "传输层初始化失败。");
+        ca_ui_shutdown(&ui);
+        ca_ws_free(ws);
+        return 3;
+    }
+
+    ca_core_config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.transport = tr;
+    cfg.api_base = base;
+    cfg.model = model;
+    cfg.api_key = key;
+    cfg.system = sys;
+    cfg.ui = &ui;
+    cfg.ws = ws;
+    /* perm 留空 → core 按「默认拒绝」处理。
+     * 这是 P1 的落点：**没有配置就不放行**，而不是配置漏了就全放行。 */
+    cfg.perm = NULL;
+    cfg.perm_user = NULL;
+
+    ca_core_status st = ca_core_init(&g_core, &cfg);
+    if (st != CA_CORE_OK) {
+        ca_ui_printf(&ui, "初始化失败：%s\n", ca_core_status_text(st));
+        if (tr->cleanup != NULL) tr->cleanup();
+        ca_ui_shutdown(&ui);
+        ca_ws_free(ws);
+        return 2;
+    }
+
+    if (ui.is_tty) ca_ui_line(&ui, k_banner);
+    static char line[CA_MAIN_INPUT_MAX];
+    int exit_code = 0;
+
+    if (offline) {
+        /* 离线模式必须在界面上**明说**，否则用户会以为
+         * 模型真的这样回答 —— 那是把假的当真。 */
+        ca_ui_line(&ui, "离线自检模式：不发起任何网络请求，回复是预设内容。");
+    }
+
+    for (;;) {
+        ca_ui_printf(&ui, "> ");
+
+        size_t len = 0;
+        int r = read_line(&ui, line, sizeof(line), &len);
+
+        if (r == 0 || r == -2) break; /* EOF 或 Ctrl-C：正常退出 */
+        if (r < 0) {
+            ca_ui_line(&ui, "输入过长，已丢弃该行（上限 4095 字节）。");
+            continue;
+        }
+        if (len == 0) continue; /* 空行不发请求：省一次计费调用 */
+
+        if (line[0] == '/') {
+            if (run_command(&ui, line, offline ? "memory（离线自检）" : ca_transport_name())) break;
+            continue;
+        }
+
+        st = ca_core_run_once(&g_core, line);
+        if (st != CA_CORE_OK) {
+            /* 失败原因必须落到界面上。
+             * 早先这里只有退出码，用户看到的是「什么都没发生」。 */
+            ca_ui_printf(&ui, "[%s] %s\n", ca_core_status_text(st),
+                         g_core.last_error[0] != '\0' ? g_core.last_error : "无更多信息");
+        }
+    }
+
+    if (tr->cleanup != NULL) tr->cleanup();
+    ca_ui_shutdown(&ui); /* 必须在任何退出路径上还原终端 */
+    ca_ws_free(ws);
+    return exit_code;
+}

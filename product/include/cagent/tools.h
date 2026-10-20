@@ -92,15 +92,12 @@ typedef struct {
     const char *pending_display;
 } ca_tool_ctx;
 
-/* 取得某个破坏性工具**待展示给用户的内容**。
+/* 取得某个破坏性工具**待展示给用户的内容**（契约 P2/P5）。
  *
  * 契约 P2/P5：批准前必须看到「完整参数」与「命令原文」。
  * 这里单独提供查询，而不是让权限回调自己去解析参数——
  * 权限层不该重复解析一遍，更不该可能解析出与实际执行不同的东西。
- */
-const char *ca_tool_pending_display(const ca_tool_ctx *ctx, const char *tool_name);
-
-/* 取得某个破坏性工具待展示给用户的内容（契约 P2/P5）。
+ *
  * 返回 NULL 表示当前没有待批准的操作。 */
 const char *ca_tool_pending_display(const ca_tool_ctx *ctx, const char *tool_name);
 

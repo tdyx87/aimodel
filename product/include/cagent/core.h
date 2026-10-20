@@ -38,6 +38,10 @@ extern "C" {
 /* 回灌给模型的工具结果上限（契约 §2.1「工具结果单次上限 1 MB」的呼应）。 */
 #define CA_CORE_MAX_RESULT_BYTES (256u * 1024u)
 
+/* API key 长度上限。超长一律拒绝，**不截断**——
+ * 截断后的 key 只会在服务端换来一个 401，而用户会以为是自己填错了。 */
+#define CA_CORE_MAX_KEY_BYTES 512
+
 typedef enum {
     CA_CORE_OK = 0,
     CA_CORE_ERR_ARGS,        /* 配置缺失 */
@@ -53,6 +57,9 @@ typedef struct {
     const ca_transport_ops *transport; /* 必填；注入而非硬编码，测试才跑得起来 */
     const char *api_base;             /* 必填 */
     const char *model;                /* 必填 */
+    /* API key。可为 NULL —— 指向本地无鉴权的服务（如自建代理）。
+     * **绝不写进日志、绝不落盘**（PRD NFR-3）。 */
+    const char *api_key;
     const char *system;               /* 系统提示，可为 NULL */
     ca_ui *ui;                        /* 必填 */
     ca_workspace *ws;                 /* 工具工作区，必填 */
@@ -66,6 +73,9 @@ typedef struct {
     const char *url;        /* 由 api_base 拼出并缓存 */
     char url_buf[512];
     char system_buf[4096];
+    /* 预先拼好的 Authorization 头。空串表示不带鉴权。
+     * 定长存放，且只在内存里存在——不打印、不落盘。 */
+    char auth_header[CA_CORE_MAX_KEY_BYTES + 32];
 
     /* 本轮累积到的工具调用（由 llm 层填，执行阶段读） */
     ca_llm_tool_slot slots[CA_LLM_MAX_TOOL_CALLS];
