@@ -94,6 +94,21 @@ int ca_json_append_string(ca_json_cursor *c, char *dst, size_t cap, size_t *len)
 /* 读整数值。返回 0 成功，-1 类型不符或溢出，-2 语法错误。 */
 int ca_json_read_int(ca_json_cursor *c, long long *out);
 
+/* ---- 写入侧 ----
+ *
+ * JSON 的**语法**归本文件管，读和写都是它的职责。早先只有读，
+ * 于是 llm.c 与 session.c 各自手写了一遍转义——两份转义表迟早会分叉，
+ * 而分叉的后果是「某些字符在某个调用点没被转义」，直接产出坏 JSON。
+ *
+ * 两个函数都遵循同一个调用约定（与 llm 层组装请求体一致）：
+ *   - buf 为 NULL 时进入「只计量」模式：不写字节，只把长度累加进 *len；
+ *   - 先计量再写入，**容量不足时一个字节都不写**并返回 -1。
+ *     留半截产物比失败更危险：调用方若忽略返回值，会把一段
+ *     看似合法的 JSON 前缀发出去或落盘。
+ */
+int ca_json_write_string(char *buf, size_t cap, size_t *len, const char *s);
+int ca_json_write_raw(char *buf, size_t cap, size_t *len, const char *s);
+
 /* 在已进入的数组里取元素个数（用于遍历）。不改变原游标。
  * 返回元素个数；出错返回 -1。 */
 long ca_json_array_count(ca_json_cursor *c);

@@ -73,10 +73,21 @@ static int g_script_count;
 static int g_script_pos;
 static int g_req_count;
 
+/* 捕获请求体：证明「多轮记忆」真的到了线上，而不只是躺在内存里。
+ * 只留最近几个，够断言用，不随用例数增长。 */
+static char g_bodies[4][4096];
+static int g_body_count;
+
 static ca_http_status fake_run(const ca_request *req, ca_on_data on_data,
                                void *user) {
-    (void)req;
     g_req_count++;
+    if (req != NULL && req->body != NULL && g_body_count < 4) {
+        size_t n = strlen(req->body);
+        if (n >= sizeof(g_bodies[0])) n = sizeof(g_bodies[0]) - 1;
+        memcpy(g_bodies[g_body_count], req->body, n);
+        g_bodies[g_body_count][n] = '\0';
+    }
+    g_body_count++;
     if (g_script_pos >= g_script_count) return CA_HTTP_OK;
     const char *s = g_scripts[g_script_pos++];
     size_t len = strlen(s);
@@ -106,11 +117,16 @@ static ca_workspace *g_ws;
 static ca_ui g_ui;
 static ca_core g_core;
 
+/* 需要多轮记忆的用例先把它设上；setup 会把它交给 core 并清空，
+ * 于是其余用例天然跑在「无记忆」模式下，不必各自重置。 */
+static ca_session *g_session;
+
 static void setup(const char *system, const char *perm_answer) {
     ui_reset();
     feed_user(perm_answer);
     g_script_pos = 0;
     g_req_count = 0;
+    g_body_count = 0;
 
     memset(&g_ui, 0, sizeof(g_ui));
     g_ui.out.write = cap_write;
@@ -127,6 +143,8 @@ static void setup(const char *system, const char *perm_answer) {
     cfg.ui = &g_ui;
     cfg.ws = g_ws;
     cfg.perm = NULL;
+    cfg.session = g_session;
+    g_session = NULL;
     CA_ASSERT_EQ_INT(ca_core_init(&g_core, &cfg), CA_CORE_OK);
 }
 
@@ -339,6 +357,80 @@ CA_TEST(core_reports_oversized_request_instead_of_truncating) {
     CA_ASSERT_EQ_INT(g_req_count, 0); /* 根本没发出去 */
 }
 
+/* ==================================================== 会话历史（US-6 / §6） */
+
+CA_TEST(core_carries_history_across_inputs) {
+    /* 这条测试是「多轮记忆」的真正证据：上一次问答必须出现在
+     * 下一次请求体里。会话文件、内存结构都可能是摆设，
+     * 只有请求体骗不了人。 */
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 8192), 0);
+    g_session = &s;
+
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"content\":\"第一答\"}}]}\n\n"
+           "data: [DONE]\n\n");
+    script("data: {\"choices\":[{\"delta\":{\"content\":\"第二答\"}}]}\n\n"
+           "data: [DONE]\n\n");
+    setup(NULL, "");
+
+    CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "第一问"), CA_CORE_OK);
+    CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "第二问"), CA_CORE_OK);
+    CA_ASSERT_EQ_INT(g_body_count, 2);
+
+    /* 第一次请求只有本轮问题，不该凭空出现上一轮 */
+    CA_ASSERT(strstr(g_bodies[0], "第一问") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "第一答") == NULL);
+    /* 第二次请求必须带上第一轮的问答 —— 这就是记忆 */
+    CA_ASSERT(strstr(g_bodies[1], "第一问") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "第一答") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "第二问") != NULL);
+
+    /* 问题不该被重复发送：历史里已经有它，就不再作为尾随消息追加 */
+    const char *first = strstr(g_bodies[1], "第一问");
+    CA_ASSERT(first != NULL);
+    CA_ASSERT(strstr(first + 1, "第一问") == NULL);
+
+    /* 助手回复也要落进历史 */
+    CA_ASSERT_EQ_INT(ca_session_count(&s), 4);
+    CA_ASSERT_EQ_INT(ca_session_role(&s, 0), CA_MSG_USER);
+    CA_ASSERT(strcmp(ca_session_text(&s, 1), "第一答") == 0);
+    CA_ASSERT(strcmp(ca_session_text(&s, 3), "第二答") == 0);
+    ca_session_free(&s);
+}
+
+CA_TEST(core_tells_user_when_history_is_evicted) {
+    /* 契约 T3：灌入超限历史后，淘汰必须发生**且 UI 有明示**。
+     * 悄悄丢掉上下文正是同类工具的毛病，本产品必须说出来。 */
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 1024), 0);
+    g_session = &s;
+
+    /* 每次回复 300 字节，几轮就会撑满 1024 的预算 */
+    static char frame[512];
+    char body[301];
+    memset(body, 'x', sizeof(body) - 1);
+    body[sizeof(body) - 1] = '\0';
+
+    for (int i = 0; i < 4; i++) {
+        script_reset();
+        snprintf(frame, sizeof(frame),
+                 "data: {\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n\n"
+                 "data: [DONE]\n\n", body);
+        script(frame);
+        /* setup() 用完就把 g_session 清空（让其余用例天然无记忆），
+         * 所以每一轮都要重新挂上。 */
+        g_session = &s;
+        setup(NULL, "");
+        CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "继续"), CA_CORE_OK);
+        CA_ASSERT(ca_session_used(&s) <= ca_session_budget(&s));
+    }
+
+    CA_ASSERT(s.evicted_msgs > 0);
+    CA_ASSERT(strstr(g_ui_buf, "丢弃最早的") != NULL);
+    ca_session_free(&s);
+}
+
 int main(void) {
     struct { const char *name; void (*fn)(void); } cases[] = {
         {"core_streams_text_incrementally", ca_test_run_core_streams_text_incrementally},
@@ -354,6 +446,8 @@ int main(void) {
         {"core_survives_empty_response", ca_test_run_core_survives_empty_response},
         {"core_endpoints_are_built_from_base", ca_test_run_core_endpoints_are_built_from_base},
         {"core_reports_oversized_request_instead_of_truncating", ca_test_run_core_reports_oversized_request_instead_of_truncating},
+        {"core_carries_history_across_inputs", ca_test_run_core_carries_history_across_inputs},
+        {"core_tells_user_when_history_is_evicted", ca_test_run_core_tells_user_when_history_is_evicted},
     };
     size_t n = sizeof(cases) / sizeof(cases[0]);
 

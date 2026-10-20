@@ -422,3 +422,62 @@ int ca_json_read_int(ca_json_cursor *c, long long *out) {
     *out = sign * value;
     return 0;
 }
+
+/* ---------------------------------------------------------------- 写入侧 */
+
+/* 一个字节转义后的长度；把转义结果写进 esc（最多 6 字节）并返回长度。
+ *   \" 与 \\ 与 \n \r \t -> 2；其余控制字符 -> \u00XX（6）；其余原样（1）。
+ * UTF-8 多字节字符**不转义**：JSON 允许其直接出现，转了反而多一次解码。
+ */
+static size_t json_escape_char(unsigned char ch, char esc[6]) {
+    static const char hex[] = "0123456789abcdef";
+    if (ch == '"' || ch == '\\') {
+        esc[0] = '\\'; esc[1] = (char)ch; return 2;
+    }
+    if (ch == '\n') { esc[0] = '\\'; esc[1] = 'n'; return 2; }
+    if (ch == '\r') { esc[0] = '\\'; esc[1] = 'r'; return 2; }
+    if (ch == '\t') { esc[0] = '\\'; esc[1] = 't'; return 2; }
+    if (ch < 0x20) {
+        esc[0] = '\\'; esc[1] = 'u'; esc[2] = '0'; esc[3] = '0';
+        esc[4] = hex[(ch >> 4) & 0xF]; esc[5] = hex[ch & 0xF];
+        return 6;
+    }
+    esc[0] = (char)ch;
+    return 1;
+}
+
+int ca_json_write_string(char *buf, size_t cap, size_t *len, const char *s) {
+    if (len == NULL || s == NULL) return -1;
+    int dry = (buf == NULL);
+
+    /* 第一遍：只算这一项占多少字节，**不碰 buf**。
+     * 先算后写是为了原子性——容量不够时一个字节都不写。 */
+    size_t need = 2; /* 首尾引号 */
+    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
+        char esc[6];
+        need += json_escape_char(*p, esc);
+    }
+    if (!dry && *len + need > cap) return -1;
+
+    if (dry) { *len += need; return 0; }
+
+    buf[(*len)++] = '"';
+    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
+        char esc[6];
+        size_t n = json_escape_char(*p, esc);
+        memcpy(buf + *len, esc, n);
+        *len += n;
+    }
+    buf[(*len)++] = '"';
+    return 0;
+}
+
+int ca_json_write_raw(char *buf, size_t cap, size_t *len, const char *s) {
+    if (len == NULL || s == NULL) return -1;
+    size_t n = strlen(s);
+    if (buf == NULL) { *len += n; return 0; }
+    if (*len + n > cap) return -1;
+    memcpy(buf + *len, s, n);
+    *len += n;
+    return 0;
+}

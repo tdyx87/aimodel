@@ -96,6 +96,20 @@ typedef struct {
     const char *user;     /* 用户输入，必需 */
 } ca_llm_request;
 
+/* 请求体里的消息角色。定成枚举而不是字符串，是为了让拼错角色名
+ * 变成编译错误；角色名到了写入时才映射成协议里的字面量。 */
+typedef enum {
+    CA_MSG_USER = 0,
+    CA_MSG_ASSISTANT,
+    CA_MSG_SYSTEM
+} ca_msg_role;
+
+/* 一条历史消息。text 必须 NUL 结尾。 */
+typedef struct {
+    ca_msg_role role;
+    const char *text;
+} ca_llm_msg;
+
 /* 把请求体写进定长缓冲。
  * 返回  0 成功；
  *      -1 参数非法（缺必需字段）；
@@ -103,6 +117,15 @@ typedef struct {
  */
 int ca_llm_build_request(char *buf, size_t cap, const ca_llm_request *req,
                          size_t *need_len);
+
+/* 带历史的请求体构造。system 为 NULL 或空串时不写系统消息；
+ * msgs 按顺序写入（旧 → 新）。这是多轮记忆的落点：
+ * 单轮版本只是它「历史为空、只有一条 user」的特例。
+ */
+int ca_llm_build_request_msgs(char *buf, size_t cap,
+                              const char *model, const char *system,
+                              const ca_llm_msg *msgs, size_t msg_count,
+                              size_t *need_len);
 
 #ifdef __cplusplus
 }

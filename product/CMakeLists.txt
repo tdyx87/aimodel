@@ -69,12 +69,17 @@ target_link_libraries(cagent_sse PUBLIC cagent_buf)
 add_library(cagent_json STATIC src/json.c)
 target_link_libraries(cagent_json PUBLIC cagent_buf)
 
+# ---- session：会话历史（契约 §6） ----
+# 历史是本产品里唯一随对话增长的东西，所以它的上限必须长在结构里。
+add_library(cagent_session STATIC src/session.c)
+target_link_libraries(cagent_session PUBLIC cagent_json cagent_mem)
+
 # ---- tools：工具层（契约 §5，含路径安全与权限模型） ----
 # tools_shell.c 单独成文件：进程创建 / 管道 / 超时 / 目录遍历集中在一处，
 # 任何一处出错都可能是安全或挂死问题，混在一个文件里看不出边界。
 add_library(cagent_core STATIC src/core.c)
 target_include_directories(cagent_core PUBLIC include)
-target_link_libraries(cagent_core PUBLIC cagent_ui cagent_llm cagent_tools cagent_json cagent_sse)
+target_link_libraries(cagent_core PUBLIC cagent_ui cagent_llm cagent_tools cagent_json cagent_sse cagent_session)
 
 add_library(cagent_ui STATIC src/ui.c src/ui_term.c)
 target_include_directories(cagent_ui PUBLIC include)
@@ -159,6 +164,9 @@ if (CAGENT_BUILD_TESTS)
     add_executable(json_test tests/json_test.c)
     target_link_libraries(json_test PRIVATE ca_test cagent_json)
 
+    add_executable(session_test tests/session_test.c)
+    target_link_libraries(session_test PRIVATE ca_test cagent_session)
+
     add_executable(llm_test tests/llm_test.c)
     target_link_libraries(llm_test PRIVATE ca_test cagent_llm)
 
@@ -172,6 +180,7 @@ if (CAGENT_BUILD_TESTS)
     add_test(NAME sse_test COMMAND sse_test)
     add_test(NAME http_test COMMAND http_test)
     add_test(NAME json_test COMMAND json_test)
+    add_test(NAME session_test COMMAND session_test)
     add_test(NAME llm_test COMMAND llm_test)
     add_test(NAME tools_test COMMAND tools_test)
 

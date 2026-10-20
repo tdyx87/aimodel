@@ -326,63 +326,72 @@ const char *ca_llm_tool_args(const ca_llm *llm, unsigned index, size_t *len,
 
 /* ---------------------------------------------------------------- 请求构造 */
 
-/* JSON 字符串转义写入。
- *
- * buf 为 NULL 时进入「只计量」模式：不写任何字节，只累加长度。
- * 请求构造用两遍——先算长度，装不下就**完全不碰缓冲区**。
- * 这与 ca_buf_append 的原子语义一致：失败时不留半截产物，
- * 否则调用方若忽略返回值，会把一段看似合法的 JSON 前缀发出去。
- */
+/* json.c 现在是 JSON 语法的**唯一**出处：读与写都在那里。
+ * 本文件此前的两份本地实现（write_json_string / append_raw）已删除——
+ * 转义表复制一份，迟早会在某一边漏掉某个字符，
+ * 而漏掉的后果是产出坏 JSON，且只在特定输入下才出现。 */
 static int write_json_string(char *buf, size_t cap, size_t *len, const char *s) {
-    int dry = (buf == NULL);
-    if (!dry && *len + 1 > cap) return -1;
-    if (!dry) buf[(*len)++] = '"';
-    else (*len)++;
-    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; p++) {
-        unsigned char ch = *p;
-        size_t need = 0;
-        char esc_buf[6];
-        if (ch == '"' || ch == '\\') {
-            need = 2;
-            esc_buf[0] = '\\';
-            esc_buf[1] = (char)ch;
-        } else if (ch == '\n') {
-            need = 2; esc_buf[0] = '\\'; esc_buf[1] = 'n';
-        } else if (ch == '\r') {
-            need = 2; esc_buf[0] = '\\'; esc_buf[1] = 'r';
-        } else if (ch == '\t') {
-            need = 2; esc_buf[0] = '\\'; esc_buf[1] = 't';
-        } else if (ch < 0x20) {
-            static const char hex[] = "0123456789abcdef";
-            need = 6;
-            esc_buf[0] = '\\'; esc_buf[1] = 'u'; esc_buf[2] = '0'; esc_buf[3] = '0';
-            esc_buf[4] = hex[(ch >> 4) & 0xF];
-            esc_buf[5] = hex[ch & 0xF];
-        } else {
-            need = 1;
-            esc_buf[0] = (char)ch;
-        }
-        if (!dry && *len + need > cap) return -1;
-        if (dry) {
-            *len += need;
-        } else {
-            memcpy(buf + *len, esc_buf, need);
-            *len += need;
-        }
-    }
-    if (!dry && *len + 1 > cap) return -1;
-    if (!dry) buf[(*len)++] = '"';
-    else (*len)++;
-    return 0;
+    return ca_json_write_string(buf, cap, len, s);
 }
 
 static int append_raw(char *buf, size_t cap, size_t *len, const char *s) {
-    size_t n = strlen(s);
-    if (buf != NULL) {
-        if (*len + n > cap) return -1;
-        memcpy(buf + *len, s, n);
+    return ca_json_write_raw(buf, cap, len, s);
+}
+
+static const char *role_name(ca_msg_role r) {
+    switch (r) {
+        case CA_MSG_SYSTEM: return "system";
+        case CA_MSG_ASSISTANT: return "assistant";
+        case CA_MSG_USER:
+        default: return "user";
     }
-    *len += n;
+}
+
+int ca_llm_build_request_msgs(char *buf, size_t cap,
+                              const char *model, const char *system,
+                              const ca_llm_msg *msgs, size_t msg_count,
+                              size_t *need_len) {
+    if (model == NULL) return -1;
+    if (msgs == NULL && msg_count != 0) return -1;
+    for (size_t i = 0; i < msg_count; i++) {
+        if (msgs[i].text == NULL) return -1;
+    }
+    if (buf == NULL && cap == 0) return -1; /* 需要能算出长度 */
+
+    /* 两遍构造：第一遍只计量，装不下就**完全不碰缓冲区**。
+     * 留半截请求体比失败更糟——服务端会把它当成协议错误，
+     * 报出来的信息离真正的原因很远。 */
+    for (int pass = 0; pass < 2; pass++) {
+        char *dst = (pass == 0) ? NULL : buf;
+        size_t len = 0;
+        int bad = 0;
+
+        if (append_raw(dst, cap, &len, "{\"model\":") != 0) bad = 1;
+        if (!bad && write_json_string(dst, cap, &len, model) != 0) bad = 1;
+        if (!bad && append_raw(dst, cap, &len, ",\"stream\":true,\"messages\":[") != 0) bad = 1;
+        if (!bad && system != NULL && system[0] != '\0') {
+            if (append_raw(dst, cap, &len, "{\"role\":\"system\",\"content\":") != 0) bad = 1;
+            if (!bad && write_json_string(dst, cap, &len, system) != 0) bad = 1;
+            if (!bad && append_raw(dst, cap, &len, "},") != 0) bad = 1;
+        }
+        for (size_t i = 0; !bad && i < msg_count; i++) {
+            if (i > 0 && append_raw(dst, cap, &len, ",") != 0) { bad = 1; break; }
+            if (append_raw(dst, cap, &len, "{\"role\":\"") != 0) { bad = 1; break; }
+            if (append_raw(dst, cap, &len, role_name(msgs[i].role)) != 0) { bad = 1; break; }
+            if (append_raw(dst, cap, &len, "\",\"content\":") != 0) { bad = 1; break; }
+            if (write_json_string(dst, cap, &len, msgs[i].text) != 0) { bad = 1; break; }
+            if (append_raw(dst, cap, &len, "}") != 0) { bad = 1; break; }
+        }
+        if (!bad && append_raw(dst, cap, &len, "]}") != 0) bad = 1;
+
+        if (pass == 0) {
+            if (need_len != NULL) *need_len = len + 1; /* 含 NUL */
+            if (len + 1 > cap) return -2;
+        } else {
+            if (bad) return -2; /* 第二遍仍写不下：与第一遍同因，按容量不足报 */
+            buf[len] = '\0';
+        }
+    }
     return 0;
 }
 
@@ -390,44 +399,12 @@ int ca_llm_build_request(char *buf, size_t cap, const ca_llm_request *req,
                          size_t *need_len) {
     if (req == NULL) return -1;
     if (req->api_base == NULL || req->model == NULL || req->user == NULL) return -1;
-    if (buf == NULL && cap == 0) return -1; /* 需要能算出长度 */
 
-    /* 第一遍：只计量 */
-    size_t need = 0;
-    if (append_raw(NULL, 0, &need, "{\"model\":") != 0) goto too_small;
-    if (write_json_string(NULL, 0, &need, req->model) != 0) goto too_small;
-    if (append_raw(NULL, 0, &need, ",\"stream\":true,\"messages\":[") != 0) goto too_small;
-    if (req->system != NULL && req->system[0] != '\0') {
-        if (append_raw(NULL, 0, &need, "{\"role\":\"system\",\"content\":") != 0) goto too_small;
-        if (write_json_string(NULL, 0, &need, req->system) != 0) goto too_small;
-        if (append_raw(NULL, 0, &need, "},") != 0) goto too_small;
-    }
-    if (append_raw(NULL, 0, &need, "{\"role\":\"user\",\"content\":") != 0) goto too_small;
-    if (write_json_string(NULL, 0, &need, req->user) != 0) goto too_small;
-    if (append_raw(NULL, 0, &need, "}]}") != 0) goto too_small;
-
-    if (need_len != NULL) *need_len = need + 1; /* 含 NUL */
-
-    /* 装不下就**完全不碰缓冲区** */
-    if (need + 1 > cap) return -2;
-
-    /* 第二遍：真正写入 */
-    size_t len = 0;
-    (void)append_raw(buf, cap, &len, "{\"model\":");
-    (void)write_json_string(buf, cap, &len, req->model);
-    (void)append_raw(buf, cap, &len, ",\"stream\":true,\"messages\":[");
-    if (req->system != NULL && req->system[0] != '\0') {
-        (void)append_raw(buf, cap, &len, "{\"role\":\"system\",\"content\":");
-        (void)write_json_string(buf, cap, &len, req->system);
-        (void)append_raw(buf, cap, &len, "},");
-    }
-    (void)append_raw(buf, cap, &len, "{\"role\":\"user\",\"content\":");
-    (void)write_json_string(buf, cap, &len, req->user);
-    (void)append_raw(buf, cap, &len, "}]}");
-    buf[len] = '\0';
-    return 0;
-
-too_small:
-    if (need_len != NULL) *need_len = need + 1;
-    return -2;
+    /* 单轮请求 = 历史为空、只有一条 user 的多轮请求。
+     * 保留这个函数是为了让既有调用点与测试不必知道历史的存在。 */
+    ca_llm_msg only;
+    only.role = CA_MSG_USER;
+    only.text = req->user;
+    return ca_llm_build_request_msgs(buf, cap, req->model, req->system,
+                                     &only, 1, need_len);
 }

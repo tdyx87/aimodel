@@ -24,6 +24,7 @@
 
 #include "cagent/http.h"
 #include "cagent/llm.h"
+#include "cagent/session.h"
 #include "cagent/tools.h"
 #include "cagent/ui.h"
 
@@ -65,6 +66,11 @@ typedef struct {
     ca_workspace *ws;                 /* 工具工作区，必填 */
     ca_perm_cb perm;                  /* 可为 NULL —— 此时按「默认拒绝」处理 */
     void *perm_user;
+    /* 会话历史。可为 NULL —— 此时退化为「无记忆」的单轮模式。
+     * core 只用它做两件事：把本轮的用户输入与助手回复记进去，
+     * 并在构造请求时把历史带上。历史的上限与淘汰全在 session 层，
+     * core 不参与判定——两处各判一次，迟早会不一致。 */
+    ca_session *session;
 } ca_core_config;
 
 /* 运行期状态。全部定长，不做无界增长。 */

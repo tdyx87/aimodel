@@ -111,14 +111,21 @@ static void on_event(const ca_event *ev, void *user) {
     if (ev == NULL) return;
 
     switch (ev->kind) {
-        case CA_EV_TEXT_DELTA:
+        case CA_EV_TEXT_DELTA: {
+            const char *piece = ev->text != NULL ? ev->text : "";
             /* 第一次有文本才开流——纯工具调用的响应不该先打一个空行。 */
             if (!c->saw_text) {
                 ca_ui_stream_begin(c->cfg.ui);
                 c->saw_text = 1;
             }
-            ca_ui_stream_token(c->cfg.ui, ev->text != NULL ? ev->text : "");
+            ca_ui_stream_token(c->cfg.ui, piece);
+            /* 同一段文本同时进历史。**只在这一处**记录助手输出，
+             * 免得出现「显示的是 A、记下的是 B」这种两套真相。 */
+            if (c->cfg.session != NULL) {
+                (void)ca_session_append_delta(c->cfg.session, piece);
+            }
             break;
+        }
 
         case CA_EV_TOOL_CALL_BEGIN:
             /* 有工具调用意味着这轮不是纯文本。先收尾已经流出的文本，
@@ -158,17 +165,51 @@ static int on_data(const unsigned char *data, size_t n, void *user) {
     return 0;
 }
 
-static ca_core_status core_one_turn(ca_core *c, const char *user_text) {
+/* 构造本轮请求体。
+ *
+ * user_in_history=1 表示 user_text **已经在会话历史里**（本轮的首次请求，
+ * 我们刚把它记进去），此时只带历史；
+ * =0 表示 user_text 是历史之外的一条（工具结果回灌），追加在历史之后。
+ *
+ * 这个区分是必要的：把同一条用户输入既放进历史又当作尾随消息，
+ * 模型会看到重复的问题，回答也会开始重复。
+ */
+static int core_build_body(ca_core *c, const char *user_text,
+                           int user_in_history, char *body, size_t cap,
+                           size_t *need) {
+    if (c->cfg.session == NULL) {
+        ca_llm_request req;
+        req.api_base = c->cfg.api_base;
+        req.model = c->cfg.model;
+        req.system = c->cfg.system;
+        req.user = user_text;
+        return ca_llm_build_request(body, cap, &req, need);
+    }
+
+    /* +1 给尾随的工具结果消息。栈上 8 KB 左右，不放进 ca_core
+     * ——ca_core 已经很大，再塞进去只会让「别把 ca_core 放栈上」更危险。 */
+    static const size_t kMaxMsgs = CA_SESSION_MAX_MSGS + 1;
+    ca_llm_msg msgs[CA_SESSION_MAX_MSGS + 1];
+    size_t n = 0;
+    ca_session_export(c->cfg.session, msgs, &n);
+    if (n > CA_SESSION_MAX_MSGS) n = CA_SESSION_MAX_MSGS; /* 防御，不可能发生 */
+    if (!user_in_history) {
+        if (n >= kMaxMsgs) n = kMaxMsgs - 1;
+        msgs[n].role = CA_MSG_USER;
+        msgs[n].text = user_text;
+        n++;
+    }
+    return ca_llm_build_request_msgs(body, cap, c->cfg.model, c->cfg.system,
+                                     msgs, n, need);
+}
+
+static ca_core_status core_one_turn(ca_core *c, const char *user_text,
+                                    int user_in_history) {
     char body[CA_CORE_MAX_REQUEST];
     size_t need = 0;
 
-    ca_llm_request req;
-    req.api_base = c->cfg.api_base;
-    req.model = c->cfg.model;
-    req.system = c->cfg.system;
-    req.user = user_text;
-
-    int rc = ca_llm_build_request(body, sizeof(body), &req, &need);
+    int rc = core_build_body(c, user_text, user_in_history, body, sizeof(body),
+                             &need);
     if (rc == -1) { core_note(c, "请求参数非法"); return CA_CORE_ERR_ARGS; }
     if (rc == -2) {
         /* 缓冲不足：明确报需要多少，**不截断**。
@@ -240,6 +281,24 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text) {
     return CA_CORE_OK;
 }
 
+/* 把「历史被淘汰/被截断」这件事明确告诉用户。
+ * 数字必须给出：只说「历史过长已截断」等于没说清楚丢了什么。 */
+static void core_report_session_notice(ca_core *c) {
+    if (c->cfg.session == NULL) return;
+    int em = 0, tm = 0;
+    size_t eb = 0, tb = 0;
+    if (!ca_session_take_notice(c->cfg.session, &em, &eb, &tm, &tb)) return;
+    if (em > 0) {
+        ca_ui_printf(c->cfg.ui,
+                     "（会话历史已达上限，丢弃最早的 %d 条消息，共 %lu 字节）\n",
+                     em, (unsigned long)eb);
+    }
+    if (tm > 0) {
+        ca_ui_printf(c->cfg.ui, "（有 %d 条消息过长被截断，共丢弃 %lu 字节）\n",
+                     tm, (unsigned long)tb);
+    }
+}
+
 /* ---- 工具执行 ---- */
 
 /* 权限回调：把 tools 层给的 pending_display 原样交给 ui 呈现。
@@ -308,13 +367,20 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
 
     const char *turn_input = user_input;
     int denied = 0;
+    /* 本轮首次请求：用户输入已经记进历史，请求体里不再重复追加。 */
+    int user_in_history = 1;
+
+    if (c->cfg.session != NULL) {
+        /* 记不进历史（空串）不影响本轮问答本身，照常继续。 */
+        (void)ca_session_add(c->cfg.session, CA_MSG_USER, user_input);
+    }
 
     for (;;) {
         c->saw_text = 0;
         c->saw_tool = 0;
         c->slot_count = 0;
 
-        ca_core_status st = core_one_turn(c, turn_input);
+        ca_core_status st = core_one_turn(c, turn_input, user_in_history);
         if (st != CA_CORE_OK) {
             ca_ui_line(c->cfg.ui, "");
             ca_ui_printf(c->cfg.ui, "错误：%s\n",
@@ -322,6 +388,9 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
             return st;
         }
         ca_ui_line(c->cfg.ui, "");
+        /* 历史满了必须说出来。同类工具普遍在背后悄悄压缩历史，
+         * 用户以为上下文还在——「丢了会说」是本产品的差异点。 */
+        core_report_session_notice(c);
 
         if (c->slot_count == 0) return CA_CORE_OK; /* 纯文本回答，本轮结束 */
 
@@ -368,6 +437,8 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
 
         ca_ui_line(c->cfg.ui, "");
         turn_input = c->results;
+        /* 工具结果不在会话历史里，下一轮作为**尾随消息**追加。 */
+        user_in_history = 0;
         if (c->results_len == 0) {
             /* 没有结果可回灌，硬转下一轮只会让模型重复要同样的工具。 */
             return denied ? CA_CORE_ERR_DENIED : CA_CORE_OK;
