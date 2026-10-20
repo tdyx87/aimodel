@@ -185,6 +185,15 @@ def run(exe: str) -> int:
 
 
 def main() -> int:
+    # Windows 控制台默认是 cp1252/cp936，打印中文会抛 UnicodeEncodeError，
+    # 于是「测试通过」这件事本身会把 CI 弄红（在 Windows runner 上真实发生过）。
+    # 换成 UTF-8 并把无法编码的字符降级，诊断信息永远打得出来。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     if len(sys.argv) != 2:
         print("用法: python scripts/curl_smoke.py <cagent 可执行文件>")
         return 2
