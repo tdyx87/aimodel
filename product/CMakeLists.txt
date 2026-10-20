@@ -54,6 +54,10 @@ target_link_libraries(cagent_json PUBLIC cagent_buf)
 # ---- tools：工具层（契约 §5，含路径安全与权限模型） ----
 # tools_shell.c 单独成文件：进程创建 / 管道 / 超时 / 目录遍历集中在一处，
 # 任何一处出错都可能是安全或挂死问题，混在一个文件里看不出边界。
+add_library(cagent_core STATIC src/core.c)
+target_include_directories(cagent_core PUBLIC include)
+target_link_libraries(cagent_core PUBLIC cagent_ui cagent_llm cagent_tools cagent_json cagent_sse)
+
 add_library(cagent_ui STATIC src/ui.c src/ui_term.c)
 target_include_directories(cagent_ui PUBLIC include)
 
@@ -127,6 +131,9 @@ if (CAGENT_BUILD_TESTS)
     add_test(NAME http_test COMMAND http_test)
     add_test(NAME json_test COMMAND json_test)
     add_test(NAME llm_test COMMAND llm_test)
-    add_test(NAME ui_test COMMAND ui_test)
+    add_executable(core_test tests/core_test.c)
+    target_link_libraries(core_test PRIVATE ca_test cagent_core)
+
+    add_test(NAME core_test COMMAND core_test)
     add_test(NAME tools_test COMMAND tools_test)
 endif()

@@ -280,6 +280,21 @@ int ca_llm_on_frame(ca_llm *llm, const char *data, size_t len,
             }
         }
     }
+    /* 走到这里：既没有 choices，也没有 error。
+     * 那要么是一个**合法**的空帧（部分服务发 {} 做保活），
+     * 要么是根本解析不了的内容。
+     *
+     * 早先这里无条件 return 0，于是 `{这不是 JSON` 这种垃圾帧被静默放过——
+     * 用户看到的是「空回答 + 完成」，而实际上什么都没收到。
+     * 静默失败比报错难查得多。
+     *
+     * 用一次完整的 skip_value 判定：能跳完 = 合法帧（当保活忽略），
+     * 跳不完 = 坏帧，报错让上层知道。 */
+    {
+        ca_json_cursor probe;
+        ca_json_init(&probe, data, len);
+        if (ca_json_skip_value(&probe) != 0) return -1;
+    }
     return 0;
 }
 
