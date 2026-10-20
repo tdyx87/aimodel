@@ -362,26 +362,30 @@ int main(void) {
     if (tmp == NULL) tmp = getenv("TMP");
     if (tmp == NULL) tmp = ".";
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s%ccagent_core_test", tmp,
+    /* 路径分隔符必须先算出来，**不能**把 #if 写进 snprintf 的实参里。
+     * clang 的 -Wembedded-directive 会指出这是未定义行为——
+     * 同一类错误本仓库已经犯过一次（llm_test 里的 CA_TEST_SEP）。 */
 #if defined(_WIN32)
-             '\\'
+    const char sep = '\\';
 #else
-             '/'
+    const char sep = '/';
 #endif
-    );
+    snprintf(dir, sizeof(dir), "%s%ccagent_core_test", tmp, sep);
     {
         /* 2048 而不是 1024：GCC 的 -Wformat-truncation 指出
          * 两条命令 + 两份路径最多需要 1047 字节，1024 装不下会静默截断。
          * 截断后的命令行会创建出错误的目录名，后续用例全部拿到 NULL 工作区。 */
         char cmd[2048];
-        int n;
+        /* 不能叫 n：外层已有一个 size_t n（用例数），
+         * MSVC 的 C4456 会因为遮蔽而报错。 */
+        int clen;
 #if defined(_WIN32)
-        n = snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\" 2>nul & mkdir \"%s\"", dir, dir);
+        clen = snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\" 2>nul & mkdir \"%s\"", dir, dir);
 #else
-        n = snprintf(cmd, sizeof(cmd), "rm -rf '%s' && mkdir -p '%s'", dir, dir);
+        clen = snprintf(cmd, sizeof(cmd), "rm -rf '%s' && mkdir -p '%s'", dir, dir);
 #endif
-        CA_ASSERT(n > 0 && (size_t)n < sizeof(cmd)); /* 截断即失败 */
-        if (n <= 0 || (size_t)n >= sizeof(cmd)) {
+        CA_ASSERT(clen > 0 && (size_t)clen < sizeof(cmd)); /* 截断即失败 */
+        if (clen <= 0 || (size_t)clen >= sizeof(cmd)) {
             printf("测试命令行被截断，无法准备工作区\n");
             return 1;
         }
