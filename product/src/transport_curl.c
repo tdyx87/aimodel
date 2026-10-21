@@ -61,10 +61,22 @@ static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
 }
 
 static size_t header_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    (void)ptr;
     (void)userdata;
-    g_ctx.status_code = (long)(size * nmemb);
-    return size * nmemb;
+    size_t n = size * nmemb;
+    /* 状态行形如 "HTTP/1.1 429 Too Many Requests\r\n"。
+     *
+     * 早先这里写的是 `g_ctx.status_code = size * nmemb`——把「这一行的
+     * 字节长度」当成了状态码。于是 `last_status_code()` 永远返回几十
+     * 这样的小数，上层既判不出 4xx、也没法把 429 的额度/过载原因
+     * 转告用户（真实故障现场：界面只说「请求失败」）。 */
+    if (n > 9 && strncmp(ptr, "HTTP/", 5) == 0) {
+        const char *sp = strchr(ptr + 5, ' ');
+        if (sp != NULL) {
+            long code = strtol(sp + 1, NULL, 10);
+            if (code >= 100 && code < 600) g_ctx.status_code = code;
+        }
+    }
+    return n;
 }
 
 static int curl_init(void) {
@@ -127,6 +139,9 @@ static ca_http_status curl_run(const ca_request *req, ca_on_data on_data, void *
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     curl_easy_cleanup(curl);
+    /* 以 libcurl 的权威状态码为准，而不是信任 header 回调的解析：
+     * 重定向链、HTTP/2 的 ":status" 都可能让逐行解析漏掉最后一次。 */
+    if (status > 0) g_ctx.status_code = status;
 
     /* 上层主动中止优先于一切传输层错误——on_data 返回非 0 时
      * libcurl 会报 WRITE_ERROR，那是我们的选择，不是网络故障。 */

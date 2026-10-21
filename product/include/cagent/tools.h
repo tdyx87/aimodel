@@ -143,6 +143,11 @@ typedef struct {
 
 ca_tool_status ca_tool_search(ca_tool_ctx *ctx, const ca_search_opts *opts);
 
+/* 从模型给的参数 JSON 直接执行 search。
+ * 早先 core 的分发表里**没有 search**：函数存在、测试覆盖，但模型永远
+ * 调不到——「契约 §5.1 六工具」在真实调用路径上只有五个。 */
+ca_tool_status ca_tool_search_json(ca_tool_ctx *ctx, const char *args_json);
+
 /* ---- run_shell ----
  *
  * P5：命令原文必须**完整**展示给用户，不得折叠或省略——
@@ -189,6 +194,15 @@ ca_tool_status ca_tool_edit_preview(ca_tool_ctx *ctx, const char *args_json,
 /* 执行替换。args_json 形如
  *   {"path":"a.c","old_string":"x","new_string":"y","replace_all":false} */
 ca_tool_status ca_tool_edit_file(ca_tool_ctx *ctx, const char *args_json);
+
+/* ---- 交给模型的工具清单（OpenAI 兼容 tools 数组） ----
+ *
+ * 为什么必须由 tools 层提供而不是 llm 层写死：名称/参数只在 tools 层是
+ * 唯一的真相，llm 层另写一份迟早会与实现不一致（比如参数名写错，
+ * 模型照着错的名字调用，最后表现为「工具总是失败」）。
+ *
+ * 返回静态只读 JSON，长度固定，不随调用增长。 */
+const char *ca_tools_schema_json(void);
 
 #ifdef __cplusplus
 }

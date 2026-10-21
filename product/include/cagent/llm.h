@@ -127,6 +127,33 @@ int ca_llm_build_request_msgs(char *buf, size_t cap,
                               const ca_llm_msg *msgs, size_t msg_count,
                               size_t *need_len);
 
+/* 同上，另外把工具声明（OpenAI 兼容的 tools 数组 JSON）写进请求体。
+ * tools_json 为 NULL 或空串时不写该字段。
+ *
+ * 为什么必须真的写进去：早先请求体只有 model/stream/messages，
+ * 模型**根本不知道有哪些工具**，于是真实服务上它只会聊天，
+ * 永远不会发 tool_calls——而脚本化冒烟伪造 tool_calls 帧，看着全绿。
+ * 单测通过不等于功能存在，这是本项目吃过的最深一次亏。
+ *
+ * 为什么由调用方传入而不是本层写死：工具名与参数只有 tools 层是
+ * 唯一真相（ca_tools_schema_json），llm 层再写一份必然漂移；
+ * 依赖方向也要求如此（core → tools，llm 不认识 tools）。 */
+int ca_llm_build_request_full(char *buf, size_t cap,
+                              const char *model, const char *system,
+                              const ca_llm_msg *msgs, size_t msg_count,
+                              const char *tools_json, size_t *need_len);
+
+/* 同上，另外把工具声明（OpenAI 兼容的 tools 数组 JSON）写进请求体。
+ * tools_json 为 NULL/空串时不写该字段。
+ *
+ * 为什么工具声明由调用方传入而不是本层写死：工具名与参数只有 tools 层
+ * 是唯一真相（见 ca_tools_schema_json），llm 层再写一份必然漂移。
+ * 依赖方向也要求如此：core → tools，llm 不认识 tools。 */
+int ca_llm_build_request_full(char *buf, size_t cap,
+                              const char *model, const char *system,
+                              const ca_llm_msg *msgs, size_t msg_count,
+                              const char *tools_json, size_t *need_len);
+
 #ifdef __cplusplus
 }
 #endif

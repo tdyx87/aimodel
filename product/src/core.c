@@ -132,6 +132,11 @@ typedef struct {
     ca_llm *llm;
     ca_sse *sse;
     int frame_error;
+    /* 服务端用 4xx 回普通 JSON 错误体时，SSE 分帧器会判「无法解析」，
+     * 真正的原因（额度不足、模型过载……）就在这段字节里。
+     * 只留前 255 字节：**有界**，不违反契约 C1（不缓存整段响应）。 */
+    char raw[256];
+    size_t raw_len;
 } turn_ctx;
 
 static void on_event(const ca_event *ev, void *user) {
@@ -182,11 +187,57 @@ static void on_frame(const ca_sse_frame *f, void *user) {
     if (rc != 0) t->frame_error = rc;
 }
 
+/* 从服务端的错误体里取出可读原因。
+ * 覆盖 {"error":{"code":"…","message":"…"}} 这种常见形状；
+ * 取不到 JSON 就原样给一小段（换行压成空格，别把界面刷乱）。
+ * 返回 0 表示「没拿到有用信息」，由调用方用通用文案。 */
+static int core_error_reason(const char *raw, char *out, size_t cap) {
+    if (raw == NULL || cap < 2) return 0;
+    const char *p = strstr(raw, "\"message\"");
+    if (p != NULL) {
+        p = strchr(p, ':');
+        if (p != NULL) {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '"') {
+                p++;
+                size_t i = 0;
+                while (*p != '\0' && *p != '"' && i + 1 < cap) {
+                    if (*p == '\\' && p[1] != '\0') {
+                        p++;
+                        if (*p == 'n' || *p == 't' || *p == 'r') { out[i++] = ' '; p++; continue; }
+                    }
+                    out[i++] = *p++;
+                }
+                out[i] = '\0';
+                return i > 0;
+            }
+        }
+    }
+    size_t i = 0;
+    while (raw[i] != '\0' && i + 1 < cap) {
+        char ch = raw[i];
+        out[i] = (ch == '\n' || ch == '\r' || ch == '\t') ? ' ' : ch;
+        i++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
 /* 传输层的数据回调：**只喂分帧器，不做任何缓冲**。
- * 这是契约 C1 在 core 层的落点——这里若开始缓存，内存就等于响应大小。 */
+ * 这是契约 C1 在 core 层的落点——这里若开始缓存，内存就等于响应大小。
+ *
+ * 唯一的例外是下面那 255 字节的 `raw`：定长、够用即停，
+ * 目的是让 4xx 错误体里的原因能被说出来（真实案例：服务端返回
+ * 429 + {"message":"模型过载"}，界面却只说「无法解析的内容」）。 */
 static int on_data(const unsigned char *data, size_t n, void *user) {
     turn_ctx *t = (turn_ctx *)user;
     if (t->frame_error != 0) return 1; /* 已在出错 → 要求传输中止 */
+    if (t->raw_len + n <= sizeof(t->raw) - 1) {
+        memcpy(t->raw + t->raw_len, data, n);
+        t->raw_len += n;
+        t->raw[t->raw_len] = '\0';
+    }
     if (ca_sse_feed(t->sse, data, n, on_frame, t) != 0) {
         t->frame_error = -1;
         return 1;
@@ -242,6 +293,32 @@ static size_t core_next_turn(const ca_llm_msg *msgs, size_t n, size_t drop) {
     return i;
 }
 
+/* 传输层记下的 HTTP 状态码（拿不到就当 0）。 */
+static long core_http_status(const ca_core *c) {
+    if (c->cfg.transport == NULL || c->cfg.transport->last_status_code == NULL) {
+        return 0;
+    }
+    return c->cfg.transport->last_status_code();
+}
+
+/* 失败原因必须带出服务端说的话。
+ * 只报 fallback（「请求失败」「无法解析的内容」）等于把服务端唯一
+ * 有用的信息丢掉：用户分不清是额度不足、模型过载还是 key 过期。
+ *
+ * 格式串保持纯 ASCII：MSVC 对含中文的格式串会误报 C4474（参数过多），
+ * 而零告警是硬门禁——中文一律作为参数传。 */
+static void core_note_http_error(ca_core *c, long status, const char *raw,
+                                 const char *fallback) {
+    char reason[160];
+    if (status >= 400 && core_error_reason(raw, reason, sizeof(reason))) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "HTTP %ld: %s", status, reason);
+        core_note(c, msg);
+        return;
+    }
+    core_note(c, fallback);
+}
+
 static ca_core_status core_one_turn(ca_core *c, const char *user_text,
                                     int user_in_history) {
     ca_llm_msg msgs[CA_SESSION_MAX_MSGS + 1];
@@ -251,9 +328,12 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
     size_t drop = 0;
     size_t need = 0;
     for (;;) {
-        int rc = ca_llm_build_request_msgs(c->body, c->body_cap, c->cfg.model,
+        /* 工具声明随请求一起发。没有它，真实服务上的模型只会聊天，
+         * 永远不会发出 tool_calls（§4.3 / US-3）。 */
+        int rc = ca_llm_build_request_full(c->body, c->body_cap, c->cfg.model,
                                            c->cfg.system, msgs + drop,
-                                           nmsg - drop, &need);
+                                           nmsg - drop, ca_tools_schema_json(),
+                                           &need);
         if (rc != -2) {
             if (rc == -1) { core_note(c, "请求参数非法"); return CA_CORE_ERR_ARGS; }
             break;
@@ -324,6 +404,7 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
 
     turn_ctx t;
     t.core = c; t.llm = llm; t.sse = &sse; t.frame_error = 0;
+    t.raw[0] = '\0'; t.raw_len = 0;
 
     /* llm 状态必须跨轮次保留：工具调用的参数是分片累积的，
      * 每一轮都是新响应，重新 create 才对。 */
@@ -356,11 +437,17 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
     if (c->saw_text) ca_ui_stream_end(c->cfg.ui);
 
     if (t.frame_error != 0) {
-        core_note(c, "服务返回了无法解析的内容");
+        core_note_http_error(c, core_http_status(c), t.raw,
+                             "服务返回了无法解析的内容");
         return CA_CORE_ERR_PROTOCOL;
     }
     if (hs != CA_HTTP_OK) {
-        if (c->last_error[0] == '\0') core_note(c, "请求失败");
+        /* 真实传输层在 4xx 时返回 ERR_PROTOCOL，**不会**置 frame_error
+         * （错误体不像 SSE，分帧器直接跳过）——所以这条分支才是
+         * 「额度不足/模型过载」真正走到的地方。 */
+        if (c->last_error[0] == '\0') {
+            core_note_http_error(c, core_http_status(c), t.raw, "请求失败");
+        }
         return (hs == CA_HTTP_ERR_PROTOCOL) ? CA_CORE_ERR_PROTOCOL
                                              : CA_CORE_ERR_TRANSPORT;
     }
@@ -420,6 +507,41 @@ static void results_append(ca_core *c, const char *s) {
     c->results_len += n;
 }
 
+/* 工具结果回灌时必须说明「工具已经跑完了」。
+ *
+ * 真实模型上的现场：GLM 收到工具结果（以 user 消息回灌）后，
+ * 会**原样再要一次同一个工具**——因为它看到的是「用户又发了一段话」，
+ * 而不是「你刚才那次调用的结果」。于是同一个写文件请求被反复请求，
+ * 用户要一次次批准。
+ *
+ * 明确告诉它「工具已执行、这是结果、请据此继续」，重复调用明显减少。
+ * 这不是万能药：OpenAI 规范里的 `role:"tool"` + `tool_call_id` 握手
+ * 才是根本解（见 audit 的遗留项），但在当前实现下这句提示是必需的。
+ *
+ * 措辞必须区分「执行了」和「被拒了」：被拒的工具**没有执行**，
+ * 说成「已执行」会让模型以为文件已经写好了——那正是最坏的情况。 */
+static void results_append_notice(ca_core *c, const char *tool_name,
+                                  ca_tool_status ts) {
+    char note[320];
+    /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，零告警是硬门禁。 */
+    if (ts == CA_TOOL_DENIED) {
+        snprintf(note, sizeof(note),
+                 "<tool_result tool=\"%s\" status=\"denied\">"
+                 "The user declined this call, so the tool did NOT run. "
+                 "Do not retry the same call; explain what you would do "
+                 "instead or ask the user how to proceed.</tool_result>\n",
+                 tool_name != NULL ? tool_name : "");
+    } else {
+        snprintf(note, sizeof(note),
+                 "<tool_result tool=\"%s\" status=\"done\">"
+                 "The tool has already been executed. "
+                 "Use this result to continue; do not call the same tool again "
+                 "unless the result shows it failed.</tool_result>\n",
+                 tool_name != NULL ? tool_name : "");
+    }
+    results_append(c, note);
+}
+
 /* 把工具名映射到具体的执行函数。未知的工具名一律拒绝执行——
  * 模型可能幻觉出一个不存在的工具，那是它的错，不是我们的。 */
 static ca_tool_status run_tool(ca_core *c, const char *name, const char *args) {
@@ -428,6 +550,7 @@ static ca_tool_status run_tool(ca_core *c, const char *name, const char *args) {
     if (strcmp(name, "list_dir") == 0) return ca_tool_list_dir(&c->tctx, args);
     if (strcmp(name, "run_shell") == 0) return ca_tool_run_shell(&c->tctx, args);
     if (strcmp(name, "edit_file") == 0) return ca_tool_edit_file(&c->tctx, args);
+    if (strcmp(name, "search") == 0) return ca_tool_search_json(&c->tctx, args);
     ca_out_puts(&c->tout, "<result status=\"error\" error=\"不认识的工具\">"
                            "本代理没有这个工具。请只用已有工具。</result>");
     return CA_TOOL_ERR_ARGS;
@@ -520,6 +643,9 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
                 ca_ui_line(c->cfg.ui, "（该工具未成功，结果见上）");
             }
             if (c->tout.len > 0) results_append(c, c->tool_out);
+            /* 附一句说明工具的状态：真实模型收到裸结果会原样再要一次
+             * 同一个工具，用户被迫反复批准。措辞区分「已执行」与「被拒绝」。 */
+            results_append_notice(c, s->name, ts);
         }
 
         ca_ui_line(c->cfg.ui, "");

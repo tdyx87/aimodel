@@ -27,6 +27,15 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(_WIN32)
+#  include <process.h>
+#  define CA_TEST_PID() ((unsigned long)_getpid())
+#else
+#  include <unistd.h>
+#  define CA_TEST_PID() ((unsigned long)getpid())
+#endif
+
+
 #if !defined(_WIN32)
 #  include <sys/stat.h>
 #endif
@@ -322,8 +331,8 @@ static void make_test_dir(char *buf, size_t cap) {
     const char *base = getenv("TEMP");
     if (base == NULL) base = getenv("TMPDIR");
     if (base == NULL) base = ".";
-    snprintf(buf, cap, "%s%ccagent_sess_test_%lu",
-             base, (char)SEP_CHAR, (unsigned long)time(NULL));
+    snprintf(buf, cap, "%s%ccagent_sess_test_%lu_%lu",
+             base, (char)SEP_CHAR, (unsigned long)time(NULL), CA_TEST_PID());
 }
 
 CA_TEST(session_save_overwrites_previous_file) {
@@ -337,10 +346,10 @@ CA_TEST(session_save_overwrites_previous_file) {
      * 注意这条在 Linux/macOS 上**改前改后都是绿的**：它守的是
      * Windows 分支。这正是要把它写进测试的原因。 */
     char dir[CA_SESSION_MAX_PATH];
-    snprintf(dir, sizeof(dir), "%s%ccagent_sess_test_%lu_overwrite",
+    snprintf(dir, sizeof(dir), "%s%ccagent_sess_test_%lu_%lu_overwrite",
              (getenv("TEMP") != NULL ? getenv("TEMP")
                                      : (getenv("TMPDIR") != NULL ? getenv("TMPDIR") : ".")),
-             (char)SEP_CHAR, (unsigned long)time(NULL));
+             (char)SEP_CHAR, (unsigned long)time(NULL), CA_TEST_PID());
     CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
 
     ca_session s;

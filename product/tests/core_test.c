@@ -24,6 +24,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#  include <process.h>
+#  define CA_TEST_PID() ((unsigned long)_getpid())
+#else
+#  include <unistd.h>
+#  define CA_TEST_PID() ((unsigned long)getpid())
+#endif
+
+
 /* ---- 捕获 UI 输出与用户输入 ---- */
 
 static char g_ui_buf[1 << 18];
@@ -83,10 +92,14 @@ static int g_req_count;
 static char g_bodies[4][20480];
 static int g_body_count;
 
+/* 默认成功；需要模拟 4xx 的用例自己改，用完复位。
+ * 真实传输层在 4xx 时返回 ERR_PROTOCOL 并把状态码留在 last_status_code，
+ * 假传输层必须**同样**这么做，否则测出来的只是假实现的行为。 */
+static long g_fake_status = 200;
+
 static ca_http_status fake_run(const ca_request *req, ca_on_data on_data,
                                void *user) {
-    g_req_count++;
-    if (req != NULL && req->body != NULL && g_body_count < 4) {
+    g_req_count++;    if (req != NULL && req->body != NULL && g_body_count < 4) {
         size_t n = strlen(req->body);
         if (n >= sizeof(g_bodies[0])) n = sizeof(g_bodies[0]) - 1;
         memcpy(g_bodies[g_body_count], req->body, n);
@@ -107,10 +120,10 @@ static ca_http_status fake_run(const ca_request *req, ca_on_data on_data,
         }
         off += chunk;
     }
-    return CA_HTTP_OK;
+    return (g_fake_status >= 400) ? CA_HTTP_ERR_PROTOCOL : CA_HTTP_OK;
 }
 
-static long fake_status(void) { return 200; }
+static long fake_status(void) { return g_fake_status; }
 
 static const ca_transport_ops g_fake = {
     NULL, NULL, fake_run, fake_status
@@ -247,6 +260,106 @@ CA_TEST(core_rejects_malformed_response) {
     ca_core_status st = ca_core_run_once(&g_core, "x");
     CA_ASSERT_EQ_INT(st, CA_CORE_ERR_PROTOCOL);
     CA_ASSERT(strstr(g_ui_buf, "错误") != NULL);
+}
+
+CA_TEST(core_tool_result_tells_model_the_tool_already_ran) {
+    /* 工具结果必须附带「工具已执行」的说法。
+     *
+     * 真实服务上的现场：GLM 收到裸结果（以 user 消息回灌）后，
+     * 会**原样再要一次同一个工具**，用户被迫一次次批准同样的操作。
+     * 措辞必须区分「已执行」与「被拒绝」——被拒的工具**没有执行**，
+     * 说成已执行会让模型以为文件已经写好，那是最坏的结果。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"c1\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"notice_ok.txt\\\",\\\"content\\\":\\\"hi\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 1;
+    setup(NULL, "y"); /* 用户批准 */
+    (void)ca_core_run_once(&g_core, "写文件");
+    /* 第二个请求里必须带上「已执行」的说明 */
+    CA_ASSERT(g_req_count >= 2);
+    CA_ASSERT(strstr(g_bodies[1], "already been executed") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "tool_result") != NULL);
+    /* 文件名要与别的用例错开：早先用了 x.txt，把
+     * core_permission_defaults_to_deny 依赖的「x.txt 不存在」破坏了。 */
+    ws_file_remove("notice_ok.txt");
+}
+
+CA_TEST(core_denied_tool_result_says_it_did_not_run) {
+    /* 被拒绝的工具**没有执行**。回灌里必须说清楚，
+     * 否则模型会以为文件已经写好，继续往下编。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"c1\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"notice_denied.txt\\\",\\\"content\\\":\\\"hi\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 1;
+    setup(NULL, "n"); /* 用户拒绝 */
+    (void)ca_core_run_once(&g_core, "写文件");
+    ws_file_remove("notice_denied.txt");
+    CA_ASSERT(g_req_count >= 2);
+    CA_ASSERT(strstr(g_bodies[1], "did NOT run") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "already been executed") == NULL);
+}
+
+CA_TEST(core_offers_tools_to_the_model) {
+    /* 请求体里必须真的带 tools 声明。
+     *
+     * 这是真实故障：请求构造器从头到尾只写 model/stream/messages，
+     * 模型根本没被告知有哪些工具，于是真实服务上它只会聊天、
+     * 永远不发 tool_calls；而脚本化的 tool_smoke 伪造 tool_calls 帧，
+     * 整条链路看起来是通的（测试绿、功能不存在）。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n"
+           "data: [DONE]\n\n");
+    setup(NULL, "");
+    CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "你好"), CA_CORE_OK);
+    CA_ASSERT(strstr(g_bodies[0], "\"tools\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "\"parameters\"") != NULL);
+    /* 六个工具都要在，名字必须与 tools 层分发的一致 */
+    CA_ASSERT(strstr(g_bodies[0], "\"read_file\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "\"write_file\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "\"edit_file\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "\"list_dir\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "\"search\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "\"run_shell\"") != NULL);
+    /* 参数名写错等于工具永远失败，抽两个最容易错的对一下 */
+    CA_ASSERT(strstr(g_bodies[0], "\"old_string\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "\"command\"") != NULL);
+}
+
+CA_TEST(core_surfaces_http_error_body) {
+    /* 真实故障复现：服务端返回 429 + 普通 JSON 错误体
+     *     {"error":{"code":"1305","message":"该模型当前访问量过大，请您稍后再试"}}
+     * 旧实现只把这段字节交给 SSE 分帧器，分帧失败后统一报
+     * 「服务返回了无法解析的内容」——用户看不到状态码，也看不到
+     * 「模型过载」这个唯一有用的信息，只能盲目重试。
+     *
+     * 现在要求：错误里必须带 HTTP 状态码 + 服务端 message。 */
+    script_reset();
+    script("{\"error\":{\"code\":\"1305\",\"message\":\"该模型当前访问量过大，请稍后再试\"}}");
+    g_fake_status = 429;
+    setup(NULL, "");
+    ca_core_status st = ca_core_run_once(&g_core, "x");
+    g_fake_status = 200; /* 复位：后面的用例不该继承这个状态 */
+    CA_ASSERT_EQ_INT(st, CA_CORE_ERR_PROTOCOL);
+    CA_ASSERT(strstr(g_core.last_error, "429") != NULL);
+    /* 中文按 UTF-8 源码字面量比较：用例文件本身是 UTF-8，
+     * 服务端原文也是 UTF-8，中间没有转码，不应出现转义。 */
+    CA_ASSERT(strstr(g_core.last_error, "访问量过大") != NULL);
+}
+
+CA_TEST(core_keeps_generic_message_when_no_body) {
+    /* 反向保护：200 但内容无法解析时，**不能**把半截 SSE 原文
+     * 当成「服务端原因」贴到界面上——那是噪音，不是信息。 */
+    script_reset();
+    script("data: {这不是 JSON\n\ndata: [DONE]\n\n");
+    g_fake_status = 200;
+    setup(NULL, "");
+    CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "x"), CA_CORE_ERR_PROTOCOL);
+    CA_ASSERT(strstr(g_core.last_error, "无法解析") != NULL);
+    CA_ASSERT(strstr(g_core.last_error, "HTTP") == NULL);
 }
 
 CA_TEST(core_rejects_unknown_tool) {
@@ -609,6 +722,11 @@ int main(void) {
         {"core_streams_text_incrementally", ca_test_run_core_streams_text_incrementally},
         {"core_survives_split_chunks", ca_test_run_core_survives_split_chunks},
         {"core_rejects_malformed_response", ca_test_run_core_rejects_malformed_response},
+        {"core_tool_result_tells_model_the_tool_already_ran", ca_test_run_core_tool_result_tells_model_the_tool_already_ran},
+        {"core_denied_tool_result_says_it_did_not_run", ca_test_run_core_denied_tool_result_says_it_did_not_run},
+        {"core_offers_tools_to_the_model", ca_test_run_core_offers_tools_to_the_model},
+        {"core_surfaces_http_error_body", ca_test_run_core_surfaces_http_error_body},
+        {"core_keeps_generic_message_when_no_body", ca_test_run_core_keeps_generic_message_when_no_body},
         {"core_rejects_unknown_tool", ca_test_run_core_rejects_unknown_tool},
         {"core_tool_requires_approval_and_shows_it", ca_test_run_core_tool_requires_approval_and_shows_it},
         {"core_permission_defaults_to_deny", ca_test_run_core_permission_defaults_to_deny},
@@ -644,7 +762,8 @@ int main(void) {
 #else
     const char sep = '/';
 #endif
-    snprintf(dir, sizeof(dir), "%s%ccagent_core_test", tmp, sep);
+    snprintf(dir, sizeof(dir), "%s%ccagent_core_test_%lu", tmp, sep,
+             CA_TEST_PID());
     snprintf(g_ws_dir, sizeof(g_ws_dir), "%s", dir);
     {
         /* 2048 而不是 1024：GCC 的 -Wformat-truncation 指出

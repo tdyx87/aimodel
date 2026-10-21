@@ -21,6 +21,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#  include <process.h>
+#  define CA_TEST_PID() ((unsigned long)_getpid())
+#else
+#  include <unistd.h>
+#  define CA_TEST_PID() ((unsigned long)getpid())
+#endif
+
+
 #if !defined(_WIN32)
 #  include <unistd.h>
 #endif
@@ -58,9 +67,9 @@ static const char *make_ws_dir(void) {
     const char *tmp = getenv("TEMP");
     if (tmp == NULL) tmp = getenv("TMP");
     if (tmp == NULL) tmp = "C:\\Windows\\Temp";
-    snprintf(dir, sizeof(dir), "%s\\cagent_tools_test", tmp);
+    snprintf(dir, sizeof(dir), "%s\\cagent_tools_test_%lu", tmp, CA_TEST_PID());
 #else
-    snprintf(dir, sizeof(dir), "/tmp/cagent_tools_test");
+    snprintf(dir, sizeof(dir), "/tmp/cagent_tools_test_%lu", CA_TEST_PID());
 #endif
     /* 幂等清理后重建 */
     /* 缓冲区要装下两条命令 + 两份路径 + 引号语法：

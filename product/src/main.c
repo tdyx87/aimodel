@@ -536,10 +536,9 @@ int main(int argc, char **argv) {
 
         st = ca_core_run_once(&g_core, line);
         if (st != CA_CORE_OK) {
-            /* 失败原因必须落到界面上。
-             * 早先这里只有退出码，用户看到的是「什么都没发生」。 */
-            ca_ui_printf(&ui, "[%s] %s\n", ca_core_status_text(st),
-                         g_core.last_error[0] != '\0' ? g_core.last_error : "无更多信息");
+            /* 错误**已经由 core 打印**（它知道 last_error）。
+             * 这里再打一次会造成同样的「错误：…」连出两行——
+             * 真实故障现场里正是这样，用户以为失败了两回。 */
         } else {
             /* 每轮结束就落盘：崩溃/断电至多丢一轮，而不是整段对话。 */
             save_session_quietly();

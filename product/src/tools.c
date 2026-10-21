@@ -744,3 +744,65 @@ ca_tool_status ca_tool_list_dir(ca_tool_ctx *ctx, const char *args_json) {
     ca_out_puts(ctx->out, "</result>\n");
     return CA_TOOL_OK;
 }
+
+
+/* ------------------------------------------------------------ 工具清单 */
+
+/* 交给模型的工具声明。参数名必须与各工具实际解析的键一致：
+ *   read_file  path, offset, limit
+ *   write_file path, content
+ *   edit_file  path, old_string, new_string, replace_all
+ *   list_dir   path
+ *   search     pattern, glob, max_results
+ *   run_shell  command, timeout_ms
+ * 描述里写清「破坏性操作需要用户批准」，让模型知道可能要等，
+ * 而不是把「等待批准」误判成失败后换个方式硬来。 */
+const char *ca_tools_schema_json(void) {
+    static const char k_schema[] =
+        "["
+        "{\"type\":\"function\",\"function\":{"
+        "\"name\":\"read_file\","
+        "\"description\":\"读取工作区内的文本文件，结果带行号；超出上限会显式标注截断\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"path\":{\"type\":\"string\",\"description\":\"工作区内的相对路径\"},"
+        "\"offset\":{\"type\":\"integer\",\"description\":\"起始行（从 0 开始）\"},"
+        "\"limit\":{\"type\":\"integer\",\"description\":\"最多读取的行数\"}"
+        "},\"required\":[\"path\"]}}},"
+        "{\"type\":\"function\",\"function\":{"
+        "\"name\":\"write_file\","
+        "\"description\":\"写入或覆盖文件。破坏性操作，需要用户逐次批准\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"path\":{\"type\":\"string\",\"description\":\"工作区内的相对路径\"},"
+        "\"content\":{\"type\":\"string\",\"description\":\"完整文件内容\"}"
+        "},\"required\":[\"path\",\"content\"]}}},"
+        "{\"type\":\"function\",\"function\":{"
+        "\"name\":\"edit_file\","
+        "\"description\":\"按精确匹配替换文件中的片段。破坏性操作，需要用户逐次批准\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"path\":{\"type\":\"string\"},"
+        "\"old_string\":{\"type\":\"string\",\"description\":\"要被替换的原文，必须精确匹配\"},"
+        "\"new_string\":{\"type\":\"string\"},\"replace_all\":{\"type\":\"boolean\"}"
+        "},\"required\":[\"path\",\"old_string\",\"new_string\"]}}},"
+        "{\"type\":\"function\",\"function\":{"
+        "\"name\":\"list_dir\","
+        "\"description\":\"列出工作区内某个目录的条目\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},"
+        "{\"type\":\"function\",\"function\":{"
+        "\"name\":\"search\","
+        "\"description\":\"在工作区内按字面串搜索（不支持正则），结果带文件与行号\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"pattern\":{\"type\":\"string\"},"
+        "\"glob\":{\"type\":\"string\",\"description\":\"文件名子串过滤\"},"
+        "\"max_results\":{\"type\":\"integer\"}"
+        "},\"required\":[\"pattern\"]}}},"
+        "{\"type\":\"function\",\"function\":{"
+        "\"name\":\"run_shell\","
+        "\"description\":\"执行 shell 命令。破坏性操作，需要用户逐次批准\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"command\":{\"type\":\"string\",\"description\":\"完整命令行\"},"
+        "\"timeout_ms\":{\"type\":\"integer\"}"
+        "},\"required\":[\"command\"]}}}"
+        "]";
+    return k_schema;
+}

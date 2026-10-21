@@ -347,10 +347,10 @@ static const char *role_name(ca_msg_role r) {
     }
 }
 
-int ca_llm_build_request_msgs(char *buf, size_t cap,
+int ca_llm_build_request_full(char *buf, size_t cap,
                               const char *model, const char *system,
                               const ca_llm_msg *msgs, size_t msg_count,
-                              size_t *need_len) {
+                              const char *tools_json, size_t *need_len) {
     if (model == NULL) return -1;
     if (msgs == NULL && msg_count != 0) return -1;
     for (size_t i = 0; i < msg_count; i++) {
@@ -382,7 +382,18 @@ int ca_llm_build_request_msgs(char *buf, size_t cap,
             if (write_json_string(dst, cap, &len, msgs[i].text) != 0) { bad = 1; break; }
             if (append_raw(dst, cap, &len, "}") != 0) { bad = 1; break; }
         }
-        if (!bad && append_raw(dst, cap, &len, "]}") != 0) bad = 1;
+        /* 先关 messages 数组，再挂 tools，最后关根对象。
+         * 顺序错了就是 {...,"tools":[...]]}：服务端直接 400，而界面上
+         * 只看到「请求失败」（错误体为空）。真实故障现场。 */
+        if (!bad && append_raw(dst, cap, &len, "]") != 0) bad = 1;
+        /* 工具声明必须**真的发出去**。早先请求体里没有这个字段，
+         * 于是真实服务永远只会聊天：脚本化的冒烟伪造 tool_calls 帧，
+         * 看着全绿，实际模型根本没被给过工具。 */
+        if (!bad && tools_json != NULL && tools_json[0] != '\0') {
+            if (append_raw(dst, cap, &len, ",\"tools\":") != 0) bad = 1;
+            if (!bad && append_raw(dst, cap, &len, tools_json) != 0) bad = 1;
+        }
+        if (!bad && append_raw(dst, cap, &len, "}") != 0) bad = 1;
 
         if (pass == 0) {
             if (need_len != NULL) *need_len = len + 1; /* 含 NUL */
@@ -393,6 +404,14 @@ int ca_llm_build_request_msgs(char *buf, size_t cap,
         }
     }
     return 0;
+}
+
+int ca_llm_build_request_msgs(char *buf, size_t cap,
+                              const char *model, const char *system,
+                              const ca_llm_msg *msgs, size_t msg_count,
+                              size_t *need_len) {
+    return ca_llm_build_request_full(buf, cap, model, system, msgs, msg_count,
+                                     NULL, need_len);
 }
 
 int ca_llm_build_request(char *buf, size_t cap, const ca_llm_request *req,

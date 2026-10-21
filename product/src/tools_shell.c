@@ -201,6 +201,35 @@ static void search_dir(search_state *st, const char *base, const char *rel, int 
 #endif
 }
 
+/* 从模型参数直接执行 search。
+ *
+ * 为什么需要这一层：`ca_tool_search` 收的是结构体，而模型给的是 JSON。
+ * core 的分发表按 JSON 调工具，没有这个入口，search 就**永远走不到**
+ * ——函数和单测都在，用户却用不上（契约 §5.1 的六工具只剩五个）。
+ * 参数解析放在这里，与 run_shell 用同一套 arg_* 辅助函数。 */
+ca_tool_status ca_tool_search_json(ca_tool_ctx *ctx, const char *args_json) {
+    if (ctx == NULL || args_json == NULL) return CA_TOOL_ERR_ARGS;
+    char pattern[2048];
+    char glob[256];
+    long long max_results = 0;
+    if (arg_string2(args_json, "pattern", pattern, sizeof(pattern)) != 0) {
+        ca_out_puts(ctx->out,
+                    "<result status=\"error\" error=\"缺少 pattern 参数\">"
+                    "未执行搜索。</result>");
+        return CA_TOOL_ERR_ARGS;
+    }
+    glob[0] = '\0';
+    (void)arg_string2(args_json, "glob", glob, sizeof(glob));
+    (void)arg_int2(args_json, "max_results", &max_results);
+
+    ca_search_opts opts;
+    opts.pattern = pattern;
+    opts.glob = (glob[0] != '\0') ? glob : NULL;
+    opts.max_results = (max_results > 0 && max_results < 100000)
+                           ? (int)max_results : 0;
+    return ca_tool_search(ctx, &opts);
+}
+
 ca_tool_status ca_tool_search(ca_tool_ctx *ctx, const ca_search_opts *opts) {
     if (ctx == NULL || ctx->out == NULL || opts == NULL) return CA_TOOL_ERR_ARGS;
     if (opts->pattern == NULL || opts->pattern[0] == '\0') {
