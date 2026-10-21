@@ -60,7 +60,11 @@ static void print_usage(FILE *f) {
             "  CAGENT_API_BASE   必填，服务地址，如 https://api.example.com/v1\n"
             "  CAGENT_MODEL      必填，模型名\n"
             "  CAGENT_API_KEY    可选，鉴权用；不填则不发送 Authorization\n"
-            "  CAGENT_SYSTEM     可选，系统提示\n"
+              "  CAGENT_SYSTEM    可选，系统提示\n"
+              "  CAGENT_ALLOW_SHELL  可选，设为 1 才允许模型执行命令（默认拒绝）\n"
+              "\n"
+              "模型要写文件或执行命令时，会先把具体内容列出来并问 [y/N]，\n"
+              "只有明确输入 y 才会执行。\n"
             "\n"
             "示例（PowerShell）：\n"
             "  $env:CAGENT_API_BASE=\"https://api.example.com/v1\"\n"
@@ -106,6 +110,32 @@ static void save_session_quietly(void) {
     }
 }
 
+/* ---- 工具权限策略（契约 §5.2 P1 默认拒绝） ----
+ *
+ * 分层要分清：**问不问用户**由 core 决定（`core_perm` 一定先把待批准内容
+ * 完整呈现出来，P5），**允不允许**由这里的策略决定。
+ *
+ * 早先 main 传的是 `perm = NULL`，core 的语义是「仍然提示、但一律拒绝」——
+ * 于是用户在提示处按了 y 也没用，读写文件/执行命令**全部不可用**。
+ * 那是把「默认拒绝」错当成了「默认不可用」。
+ *
+ * 现在的策略：
+ *   - 用户在提示处明确同意（y）后，读/写/改/列目录放行；
+ *   - `run_shell` 额外要求 `CAGENT_ALLOW_SHELL=1`：执行任意命令的风险
+ *     与文件读写不是一个量级，值得多加一道**显式**开关，而不是随默认放行。
+ */
+static int g_allow_shell;
+
+static ca_permission main_perm(const char *tool_name, void *user) {
+    if (tool_name != NULL && strcmp(tool_name, "run_shell") == 0 && !g_allow_shell) {
+        ca_ui_line((ca_ui *)user,
+                   "（按策略拒绝执行命令：需要显式开启，设置 CAGENT_ALLOW_SHELL=1 后重试）");
+        return CA_PERM_DENY;
+    }
+    /* 走到这里说明用户在提示处已经明确同意过一次。 */
+    return CA_PERM_ALLOW;
+}
+
 /* 返回 1 表示要求退出。 */
 static int run_command(ca_ui *ui, const char *line, const char *transport_name) {
     if (strcmp(line, "/exit") == 0 || strcmp(line, "/quit") == 0) return 1;
@@ -118,6 +148,9 @@ static int run_command(ca_ui *ui, const char *line, const char *transport_name) 
         ca_ui_line(ui, "  /resume <id>   继续指定的会话");
         ca_ui_line(ui, "  /delete <id>   删除指定的会话");
         ca_ui_line(ui, "  /exit          退出");
+        ca_ui_line(ui, "");
+        ca_ui_line(ui, "模型要改文件或执行命令时会先列出具体内容并问 [y/N]，");
+        ca_ui_line(ui, "只有输入 y 才执行。执行命令需 CAGENT_ALLOW_SHELL=1。");
         return 0;
     }
     if (strcmp(line, "/mem") == 0) {
@@ -268,12 +301,62 @@ static int read_line(ca_ui *ui, char *buf, size_t cap, size_t *out_len) {
 
 /* ---- 入口 ---- */
 
-int main(void) {
+/* 版本自报。发布出来的二进制必须能说清自己是什么：
+ * 版本、编译器标准、以及**本构建有没有链接 libcurl**——
+ * 最后这条是最容易出错也最需要一眼看到的（"为什么连不上网"多半是构建问题）。
+ * 刻意不做网络初始化：--version 在离线机器上也必须能跑。 */
+static void print_version(void) {
+    const char *backend = ca_transport_default() != NULL
+                              ? "libcurl"
+                              : "memory（本构建未链接 libcurl，无法联网）";
+    /* 格式串一律保持**纯 ASCII**，中文作为参数传入。
+     * 实测：MSVC 的格式串分析器遇到含 UTF-8 中文的 printf 格式串时，
+     * 会误报 C4474「参数太多」（同样的串在 gcc/clang 上无告警）。
+     * 这跟本仓库早先记过的 C4819 是同一类工具链问题——
+     * 与其抑制编号，不如写成两种编译器都认的形式。 */
+    printf("%s %s (C99)\n", "cagent", CAGENT_VERSION);
+    printf("%s%s\n", "传输后端：", backend);
+}
+
+static void print_cli_help(void) {
+    printf("%s",
+           "用法：cagent [选项]\n"
+           "\n"
+           "  -h, --help     显示本帮助\n"
+           "  -v, --version  显示版本与传输后端\n"
+           "  （无选项）      进入交互会话；配置取自环境变量，见下\n"
+           "\n");
+    print_usage(stdout);
+}
+
+int main(int argc, char **argv) {
+    /* 选项必须在读环境变量之前处理：--version / --help 不该要求配置。 */
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (a == NULL) continue;
+        if (strcmp(a, "--version") == 0 || strcmp(a, "-v") == 0) {
+            print_version();
+            return 0;
+        }
+        if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
+            print_cli_help();
+            return 0;
+        }
+        fprintf(stderr, "%s%s%s\n", "未知选项：", a, "（试试 --help）");
+        return 2;
+    }
+
     const char *base = getenv("CAGENT_API_BASE");
     const char *model = getenv("CAGENT_MODEL");
     const char *key = getenv("CAGENT_API_KEY");
     const char *sys = getenv("CAGENT_SYSTEM");
     const char *transport_env = getenv("CAGENT_TRANSPORT");
+
+    /* 命令执行默认关（见 main_perm）。"0"/空串都算没开，
+     * 免得 `CAGENT_ALLOW_SHELL=` 这种写法被误读成开启。 */
+    const char *allow_shell = getenv("CAGENT_ALLOW_SHELL");
+    g_allow_shell = (allow_shell != NULL && allow_shell[0] != '\0' &&
+                     strcmp(allow_shell, "0") != 0);
 
     if (base == NULL || base[0] == '\0' || model == NULL || model[0] == '\0') {
         print_usage(stderr);
@@ -353,10 +436,11 @@ int main(void) {
     cfg.system = sys;
     cfg.ui = &ui;
     cfg.ws = ws;
-    /* perm 留空 → core 按「默认拒绝」处理。
-     * 这是 P1 的落点：**没有配置就不放行**，而不是配置漏了就全放行。 */
-    cfg.perm = NULL;
-    cfg.perm_user = NULL;
+    /* 权限策略：模型每次要动文件/跑命令，core 都会先把**具体内容**
+     * 摆给用户看并等一个明确的 y；这里决定「用户同意后放不放行」。
+     * 传 NULL 会让所有工具无条件被拒(提示照出、y 无效)，所以必须接上。 */
+    cfg.perm = main_perm;
+    cfg.perm_user = &ui;
 
     /* 会话（US-6）：预算传 0 → 用契约规定的历史上限。
      * 拿不到会话目录不算致命：降级为「只在内存里记得」，

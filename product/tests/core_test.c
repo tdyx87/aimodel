@@ -20,6 +20,7 @@
 #include "cagent/ui.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -121,6 +122,45 @@ static ca_core g_core;
  * 于是其余用例天然跑在「无记忆」模式下，不必各自重置。 */
 static ca_session *g_session;
 
+/* 探测「文件是否存在」必须**按工作区根**拼路径。
+ * 早先这里拼的是 "\name"（首字符就是分隔符 = 盘符根），探测点根本
+ * 不在工作区里：断言「文件不存在」永远成立，工具真写了也发现不了——
+ * 一个永远不会红的用例。工作区根由 main 建，这里记一份。 */
+static char g_ws_dir[512];
+
+#if defined(_WIN32)
+static const char g_sep = '\\';
+#else
+static const char g_sep = '/';
+#endif
+
+static int ws_file_exists(const char *name) {
+    char probe[1024];
+    snprintf(probe, sizeof(probe), "%s%c%s", g_ws_dir, g_sep, name);
+    FILE *f = fopen(probe, "rb");
+    int found = (f != NULL);
+    if (f != NULL) fclose(f);
+    return found;
+}
+
+static void ws_file_remove(const char *name) {
+    char probe[1024];
+    snprintf(probe, sizeof(probe), "%s%c%s", g_ws_dir, g_sep, name);
+    remove(probe);
+}
+
+/* 权限三种形态：
+ *   0 = 回调为 NULL（契约 P1 的默认拒绝落点）
+ *   1 = 回调放行（模拟 main 的策略：用户已同意）
+ *   2 = 回调拒绝（模拟产品策略否决，如 run_shell 未开启）
+ * 由测试在 setup 之前设置，setup 读完就复位，避免串到下个用例。 */
+static int g_perm_kind;
+
+static ca_permission test_perm(const char *tool, void *user) {
+    (void)tool;
+    return ((int)(intptr_t)user) == 1 ? CA_PERM_ALLOW : CA_PERM_DENY;
+}
+
 static void setup(const char *system, const char *perm_answer) {
     ui_reset();
     feed_user(perm_answer);
@@ -134,6 +174,9 @@ static void setup(const char *system, const char *perm_answer) {
     g_ui.is_tty = 0; /* 强制降级路径：CI 就是非 TTY */
     g_ui.last_was_newline = 1;
 
+    int kind = g_perm_kind;
+    g_perm_kind = 0;
+
     ca_core_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.transport = &g_fake;
@@ -142,7 +185,8 @@ static void setup(const char *system, const char *perm_answer) {
     cfg.system = system;
     cfg.ui = &g_ui;
     cfg.ws = g_ws;
-    cfg.perm = NULL;
+    cfg.perm = (kind == 0) ? NULL : test_perm;
+    cfg.perm_user = (void *)(intptr_t)kind;
     cfg.session = g_session;
     g_session = NULL;
     CA_ASSERT_EQ_INT(ca_core_init(&g_core, &cfg), CA_CORE_OK);
@@ -248,12 +292,53 @@ CA_TEST(core_write_tool_is_denied_by_default) {
     (void)ca_core_run_once(&g_core, "写个文件");
     CA_ASSERT(strstr(g_ui_buf, "拒绝") != NULL);
     /* 文件必须**没有被创建**——拒绝若只发生在嘴上，就是没拒绝 */
-    char probe[1024];
-    snprintf(probe, sizeof(probe), "%s%c%s", g_ws ? "" : "",
-             g_ws ? '\\' : '/', "new.txt");
-    FILE *f = fopen(probe, "rb");
-    CA_ASSERT(f == NULL); /* 不存在 */
-    if (f != NULL) fclose(f);
+    CA_ASSERT(!ws_file_exists("new.txt")); /* 拒绝不能只停在提示上 */
+}
+
+/* ==================================================== 批准通道 */
+
+CA_TEST(core_runs_tool_when_user_approves) {
+    /* 「能用」的定义：用户在提示处输入 y 之后，工具**真的执行了**。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"c1\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"approved.txt\\\",\\\"content\\\":\\\"hi\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 1;
+    setup(NULL, "y");
+    (void)ca_core_run_once(&g_core, "写文件");
+
+    CA_ASSERT(ws_file_exists("approved.txt")); /* 真的落盘了 */
+    ws_file_remove("approved.txt");
+}
+
+CA_TEST(core_runs_tool_when_user_approves_sees_pending) {
+    /* 待批准内容必须对用户可见（P5），不能是黑盒。
+     * 与上一条共用同一份脚本，但只关心 UI 上出现了文件名。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"c1\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"shown.txt\\\",\\\"content\\\":\\\"hi\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");    g_perm_kind = 1;
+    setup(NULL, "y");
+    (void)ca_core_run_once(&g_core, "写文件");
+    CA_ASSERT(strstr(g_ui_buf, "shown.txt") != NULL);
+    ws_file_remove("shown.txt");
+}
+
+CA_TEST(core_policy_may_veto_after_user_approves) {
+    /* 用户点了 y 不等于必须放行：产品策略仍可否决（main 用它拦 run_shell）。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"c1\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"vetoed.txt\\\",\\\"content\\\":\\\"hi\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 2;
+    setup(NULL, "y");
+    (void)ca_core_run_once(&g_core, "写文件");
+
+    CA_ASSERT(!ws_file_exists("vetoed.txt")); /* 被策略拦住了 */
+    ws_file_remove("vetoed.txt");
 }
 
 /* ==================================================== 硬上限 */
@@ -440,6 +525,10 @@ int main(void) {
         {"core_tool_requires_approval_and_shows_it", ca_test_run_core_tool_requires_approval_and_shows_it},
         {"core_permission_defaults_to_deny", ca_test_run_core_permission_defaults_to_deny},
         {"core_write_tool_is_denied_by_default", ca_test_run_core_write_tool_is_denied_by_default},
+    /* 这张表是手工维护的：写了 CA_TEST 却忘了登记，用例会静默不跑 */
+    {"core_runs_tool_when_user_approves", ca_test_run_core_runs_tool_when_user_approves},
+    {"core_runs_tool_when_user_approves_sees_pending", ca_test_run_core_runs_tool_when_user_approves_sees_pending},
+    {"core_policy_may_veto_after_user_approves", ca_test_run_core_policy_may_veto_after_user_approves},
         {"core_bounds_tool_rounds", ca_test_run_core_bounds_tool_rounds},
         {"core_refuses_oversized_tool_args", ca_test_run_core_refuses_oversized_tool_args},
         {"core_rejects_incomplete_config", ca_test_run_core_rejects_incomplete_config},
@@ -465,6 +554,7 @@ int main(void) {
     const char sep = '/';
 #endif
     snprintf(dir, sizeof(dir), "%s%ccagent_core_test", tmp, sep);
+    snprintf(g_ws_dir, sizeof(g_ws_dir), "%s", dir);
     {
         /* 2048 而不是 1024：GCC 的 -Wformat-truncation 指出
          * 两条命令 + 两份路径最多需要 1047 字节，1024 装不下会静默截断。

@@ -1,5 +1,7 @@
 ﻿cmake_minimum_required(VERSION 3.15)
-project(cagent C)
+# 版本号写在这里，并且必须能被产出的二进制自报家门（cagent --version）。
+# 一个不知道自己是什么版本的二进制，出了问题只能靠猜是哪个构建。
+project(cagent VERSION 0.1.0 LANGUAGES C DESCRIPTION "极低内存的终端 AI 代理")
 
 # 契约：docs/design/contract.md
 # 产品定位：极低内存的终端 AI 代理。语言锁 C，不因为"现代语言更好写"而放宽。
@@ -195,6 +197,8 @@ endif()
 # 它不属于测试构建，所以放在 CAGENT_BUILD_TESTS 之外。
 add_executable(cagent src/main.c)
 target_link_libraries(cagent PRIVATE cagent_core)
+# 版本号注入二进制：发布检查单要求「拿到一个二进制就能说出它是哪个构建」。
+target_compile_definitions(cagent PRIVATE CAGENT_VERSION="${PROJECT_VERSION}")
 # cagent_core 是静态库，其依赖（ui/llm/tools/json/sse）以 PUBLIC 标注，
 # 因此这里不必重复列出。若漏标 PUBLIC，问题只会在链接期暴露，
 # 而且报错指向的是一个很远的符号名，不容易联想到缺了哪一行。
