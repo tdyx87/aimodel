@@ -427,9 +427,11 @@ jobs:
           cat toolsmoke.log
 
       # 文档里写的入口必须**被真的跑过**，否则等于没有入口。
-      # 独立目录 + 仅 Ubuntu：代价是几分钟，换来「build.sh 真的能配置/构建/测试」。
+      # 独立目录 + Linux/macOS：代价是几分钟，换来「build.sh 真的能配置/构建/测试」。
+      # 早先只跑 Linux，于是 C1 的 macOS 部分长期停留在「应该没问题」——
+      # 同一个脚本在两个平台上被 touch 出来的问题并不一样，得各跑一遍。
       - name: 文档入口冒烟（scripts/build.sh）
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set +e
@@ -449,6 +451,39 @@ jobs:
             exit 1
           fi
           grep -E 'tests passed|Test #' buildsh.log | tail -5
+
+      # 500 轮长会话的活跃 RSS 实测。
+      # 为什么要单独一步：请求体上限与「按轮次淘汰」刚改过，
+      # 淘汰若写错（比如每次只丢一条 assistant），内存不会降反而涨，
+      # 而这条路径**只有跑长会话才会被走到**——短冒烟和单测都看不见。
+      - name: 长会话内存实测（500 轮）
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          EXE=""
+          for cand in build/Release/cagent.exe build/cagent.exe build/cagent; do
+            if [ -f "$cand" ]; then EXE="$cand"; break; fi
+          done
+          if [ -z "$EXE" ]; then
+            echo "::error title=找不到 cagent 可执行文件::长会话内存实测无法进行"
+            exit 1
+          fi
+          echo "可执行文件: $EXE"
+          # 轮数固定 500：与 docs/audit 里记录的采样保持一致，数字才可比。
+          if ! python3 scripts/mem_load.py --exe "$EXE" --turns 500 > memload.log 2>&1; then
+            {
+              echo '### ❌ 长会话内存实测失败'
+              echo '```'; tail -c 4000 memload.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 8 ] && break
+              echo "::error title=长会话#$n::$line"
+            done < <(tail -12 memload.log)
+            exit 1
+          fi
+          tail -14 memload.log
 
       - name: 工具链指纹（失败时也打印）
         if: always()

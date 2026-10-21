@@ -51,6 +51,10 @@ ctest --test-dir build -C Release --output-on-failure
 | `CAGENT_SYSTEM` | 否 | 系统提示 |
 | `CAGENT_ALLOW_SHELL` | 否 | 设为 `1` 才允许模型执行命令；**默认拒绝** |
 | `CAGENT_TRANSPORT` | 否 | `curl`（默认）或 `mem`（离线自检，不发任何网络请求） |
+| `CAGENT_CONTEXT_BYTES` | 否 | 单次请求体上限，默认 `262144`（256 KB），范围 16 KB–4 MB；越界自动钳制 |
+
+单次请求体超限时不会直接失败：先按完整轮次淘汰最旧历史并重试，界面上会说明丢弃了多少条消息；
+只有**一轮对话自己**就超过上限时才报错，提示用 `/new` 开新会话。长会话不会因此中断。
 
 密钥只存在于进程内存：**不打印、不落盘、不进会话文件**（PRD NFR-3）。
 
