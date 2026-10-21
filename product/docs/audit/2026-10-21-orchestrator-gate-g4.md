@@ -12,7 +12,7 @@
 | G1 设计 | PRD ✅ / 契约 ✅ / **界面稿 `design/ui-terminal.md`（本次补齐）** | 上次「有条件通过」的条件已履行 |
 | G2 合入 | `2026-10-21-reviewer-gate-g2-tool-approval.md`（✅，含首轮不通过与修复） | 有结论、有复核行 |
 | G3 质量 | `2026-10-21-test-engineer-gate-g3-tool-approval.md`（完成）/ `2026-10-21-security-reviewer-gate-g3-tool-approval.md`（无 Critical/High） | 两份均在，未覆盖项已列 |
-| G4 发布 | `2026-10-21-doc-engineer-readme.md`（完成）/ `2026-10-21-release-engineer-gate-g4.md`（有条件通过） | 检查单 12 项，1 项 ⚠️（`build.sh` 未实跑） |
+| G4 发布 | `2026-10-21-doc-engineer-readme.md`（完成）/ `2026-10-21-release-engineer-gate-g4.md`（有条件通过） | 检查单 13 项、全部满足（V12 由 CI 实跑转绿，V13 记录并修复缺可执行位），1 项 ⚠️（`build.sh` 未实跑） |
 
 ## 2. 抽检（非仅凭声明）
 
@@ -22,11 +22,11 @@
 4. CI：`3873bf5` ubuntu / macos / windows **全部 success**，其中 ubuntu 的「文档入口冒烟」步骤首次实跑 `scripts/build.sh`。
    该步骤**首次运行即发现真缺陷**（脚本缺可执行位，全新 clone 上 `Permission denied`），已修并复跑通过。
 5. 抽查 reviewer 的关键判断：`write_file` 的 `pending_display` 确在 `check_perm` 之前赋值；
-   `gap`: 首轮未展示内容的缺陷已由用例 `write_pending_display_shows_path_and_content` 钉住。
+   首轮「未展示内容」的缺陷已由用例 `write_pending_display_shows_path_and_content` 钉住。
 
 ## 3. 关键决策
 
-1. **不放行「稳定版」口径**。理由：`build.sh` 未实跑、真实第三方服务未验、活跃会话 RSS 未测
+1. **不放行「稳定版」口径**。理由：macOS 上 `build.sh` 未经脚本路径验证、真实第三方服务未验、活跃会话 RSS 未测
    （release 审计 C1–C3，其中 C1 的 Linux 部分已达成）。把 0.1.0 说成稳定，等于把未验证风险转给用户。
 2. 承认单人模式的局限：同一操作者切换角色，复核行本质是自证。已在各审计 §6 显式标注，
    这也是 `agents.md` §6.6 记录的已知问题，不因本次交付而消失。
