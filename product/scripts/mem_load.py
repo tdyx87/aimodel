@@ -128,6 +128,11 @@ def main() -> int:
         print("找不到可执行文件（用 --exe 指定）", file=sys.stderr)
         return 1
 
+    # 转成绝对路径：下面 Popen 的 cwd 会是临时目录，
+    # 相对路径（如 CI 传的 build/Release/cagent）会在那个目录下解析，
+    # 直接 FileNotFoundError——本地传绝对路径时看不出来。
+    exe = exe.resolve()
+
     work = Path(tempfile.mkdtemp(prefix="cagent_memload_"))
     srv = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()

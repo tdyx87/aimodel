@@ -13,7 +13,10 @@ CONFIG="${1:-Release}"
 if [ $# -gt 0 ]; then shift; fi
 BUILD_DIR="${CAGENT_BUILD_DIR:-build}"
 
-echo "== 配置（$BUILD_DIR，$CONFIG）=="
+# 变量一律用 ${} 包住：后面紧跟中文全角标点时，bash 在非 UTF-8 locale
+# （如 macOS runner 的 C locale）会把标点的字节当成变量名的一部分，
+# 报 `BUILD_DIR，: unbound variable` —— 在 Linux 上却不会，因为它用的是 UTF-8 locale。
+echo "== 配置（${BUILD_DIR}，${CONFIG}）=="
 cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="$CONFIG" "$@"
 if [ $? -ne 0 ]; then exit 1; fi
 
