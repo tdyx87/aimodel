@@ -75,8 +75,12 @@ static int g_script_pos;
 static int g_req_count;
 
 /* 捕获请求体：证明「多轮记忆」真的到了线上，而不只是躺在内存里。
- * 只留最近几个，够断言用，不随用例数增长。 */
-static char g_bodies[4][4096];
+ * 只留最近几个，够断言用，不随用例数增长。
+ *
+ * 单个缓冲 20 KB：淘汰用例的请求体接近 16 KB 上限，早先写 4096 时
+ * 末尾的「最新问题」会被**截断在捕获缓冲里**，断言「请求里带了最新
+ * 问题」就会假阴性——捕获缓冲太小也是一种测试缺陷。 */
+static char g_bodies[4][20480];
 static int g_body_count;
 
 static ca_http_status fake_run(const ca_request *req, ca_on_data on_data,
@@ -156,6 +160,9 @@ static void ws_file_remove(const char *name) {
  * 由测试在 setup 之前设置，setup 读完就复位，避免串到下个用例。 */
 static int g_perm_kind;
 
+/* 用例想显式指定请求体上限时设它；setup 读完复位（0 = 用默认值）。 */
+static size_t g_context_bytes;
+
 static ca_permission test_perm(const char *tool, void *user) {
     (void)tool;
     return ((int)(intptr_t)user) == 1 ? CA_PERM_ALLOW : CA_PERM_DENY;
@@ -176,6 +183,8 @@ static void setup(const char *system, const char *perm_answer) {
 
     int kind = g_perm_kind;
     g_perm_kind = 0;
+    size_t context = g_context_bytes;
+    g_context_bytes = 0;
 
     ca_core_config cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -188,7 +197,11 @@ static void setup(const char *system, const char *perm_answer) {
     cfg.perm = (kind == 0) ? NULL : test_perm;
     cfg.perm_user = (void *)(intptr_t)kind;
     cfg.session = g_session;
+    cfg.context_bytes = context;
     g_session = NULL;
+    /* g_core 是 static 且被多个用例复用：init 会 memset 它，
+     * 上一轮的请求缓冲必须先释放，否则每个用例漏 256 KB。 */
+    ca_core_free(&g_core);
     CA_ASSERT_EQ_INT(ca_core_init(&g_core, &cfg), CA_CORE_OK);
 }
 
@@ -428,18 +441,93 @@ CA_TEST(core_endpoints_are_built_from_base) {
 }
 
 CA_TEST(core_reports_oversized_request_instead_of_truncating) {
-    /* 请求体装不下时必须明确报「需要多少」，
+    /* 单轮内容比整个上下文上限还大时，必须明确报「需要多少」，
      * 而不是截断成半个 JSON 发出去——
-     * 半个请求体会被服务端当成协议错误，报错还更难懂。 */
+     * 半个请求体会被服务端当成协议错误，报错还更难懂。
+     *
+     * 注意这里把上限压到最小值：默认 256 KB 时 60 KB 是**正常**请求，
+     * 早先这条用例靠的是写死的 16 KB 上限，上限可配之后必须自己指定，
+     * 否则它会变成一个「什么都测不到」的绿用例。 */
     static char huge[60000];
     memset(huge, 'x', sizeof(huge) - 1);
     huge[sizeof(huge) - 1] = '\0';
+    g_context_bytes = CA_CORE_MIN_CONTEXT_BYTES;
     script_reset();
     setup(NULL, "");
     ca_core_status st = ca_core_run_once(&g_core, huge);
     CA_ASSERT_EQ_INT(st, CA_CORE_ERR_LIMIT);
-    CA_ASSERT(strstr(g_ui_buf, "请求体") != NULL);
+    CA_ASSERT(strstr(g_ui_buf, "上下文上限") != NULL);
     CA_ASSERT_EQ_INT(g_req_count, 0); /* 根本没发出去 */
+}
+
+CA_TEST(core_trims_oldest_turns_when_over_budget) {
+    /* 历史放不下时**不能直接失败**：这是早先的真实缺陷——
+     * 请求体写死 16 KB，约 50 轮之后每轮都报「触到硬上限」，
+     * 对话彻底不可用。正确行为是丢最旧的完整轮次，并明确告诉用户。 */
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 200000), 0);
+
+    char reply[601];
+    memset(reply, 'y', sizeof(reply) - 1);
+    reply[sizeof(reply) - 1] = '\0';
+
+    for (int i = 0; i < 40; i++) {
+        char q[64];
+        snprintf(q, sizeof(q), "旧问题-%02d-MARKER", i);
+        CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, q), 0);
+        CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_ASSISTANT, reply), 0);
+    }
+
+    g_session = &s;
+    g_context_bytes = CA_CORE_MIN_CONTEXT_BYTES;
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"content\":\"答\"}}]}\n\n"
+           "data: [DONE]\n\n");
+    setup(NULL, "");
+
+    CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "最新问题-LATEST"), CA_CORE_OK);
+    CA_ASSERT_EQ_INT(g_req_count, 1);
+
+    /* 请求真的发出去了，且仍然带着**最近**的上下文 */
+    CA_ASSERT(strstr(g_bodies[0], "LATEST") != NULL);
+    CA_ASSERT(strstr(g_bodies[0], "旧问题-39-MARKER") != NULL);
+    /* 最旧的被丢掉——否则「淘汰」二字无从谈起 */
+    CA_ASSERT(strstr(g_bodies[0], "旧问题-00-MARKER") == NULL);
+    /* 丢了就要说（契约 T3） */
+    CA_ASSERT(strstr(g_ui_buf, "已丢弃最早的") != NULL);
+
+    ca_session_free(&s);
+}
+
+CA_TEST(core_clamps_context_bytes) {
+    /* 配置的边界：太小的值不该让请求永远失败，太大的值不该悄悄分配。
+     * 钳制后的真实值必须能被查询到，否则 UI 没法告诉用户实际限制。 */
+    static ca_core c;
+    ca_core_config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.transport = &g_fake;
+    cfg.api_base = "https://example.invalid/v1";
+    cfg.model = "m";
+    cfg.ui = &g_ui;
+    cfg.ws = g_ws;
+
+    cfg.context_bytes = 0;
+    CA_ASSERT_EQ_INT(ca_core_init(&c, &cfg), CA_CORE_OK);
+    CA_ASSERT_EQ_INT((long)ca_core_context_bytes(&c),
+                     (long)CA_CORE_DEFAULT_CONTEXT_BYTES);
+    ca_core_free(&c);
+
+    cfg.context_bytes = 1;
+    CA_ASSERT_EQ_INT(ca_core_init(&c, &cfg), CA_CORE_OK);
+    CA_ASSERT_EQ_INT((long)ca_core_context_bytes(&c),
+                     (long)CA_CORE_MIN_CONTEXT_BYTES);
+    ca_core_free(&c);
+
+    cfg.context_bytes = 64u * 1024u * 1024u;
+    CA_ASSERT_EQ_INT(ca_core_init(&c, &cfg), CA_CORE_OK);
+    CA_ASSERT_EQ_INT((long)ca_core_context_bytes(&c),
+                     (long)CA_CORE_MAX_CONTEXT_BYTES);
+    ca_core_free(&c);
 }
 
 /* ==================================================== 会话历史（US-6 / §6） */
@@ -535,6 +623,9 @@ int main(void) {
         {"core_survives_empty_response", ca_test_run_core_survives_empty_response},
         {"core_endpoints_are_built_from_base", ca_test_run_core_endpoints_are_built_from_base},
         {"core_reports_oversized_request_instead_of_truncating", ca_test_run_core_reports_oversized_request_instead_of_truncating},
+    /* 新增于此：上限可配 + 超限淘汰。漏登记 = 静默不跑。 */
+    {"core_trims_oldest_turns_when_over_budget", ca_test_run_core_trims_oldest_turns_when_over_budget},
+    {"core_clamps_context_bytes", ca_test_run_core_clamps_context_bytes},
         {"core_carries_history_across_inputs", ca_test_run_core_carries_history_across_inputs},
         {"core_tells_user_when_history_is_evicted", ca_test_run_core_tells_user_when_history_is_evicted},
     };

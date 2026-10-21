@@ -13,13 +13,12 @@
 #include "cagent/core.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cagent/json.h"
 #include "cagent/llm.h"
 #include "cagent/sse.h"
-
-#define CA_CORE_MAX_REQUEST 16384
 
 const char *ca_core_status_text(ca_core_status s) {
     switch (s) {
@@ -40,6 +39,17 @@ static void core_note(ca_core *c, const char *msg) {
     if (n >= sizeof(c->last_error)) n = sizeof(c->last_error) - 1;
     memcpy(c->last_error, msg, n);
     c->last_error[n] = '\0';
+}
+
+size_t ca_core_context_bytes(const ca_core *c) {
+    return (c == NULL) ? 0 : c->body_cap;
+}
+
+void ca_core_free(ca_core *c) {
+    if (c == NULL) return;
+    free(c->body);
+    c->body = NULL;
+    c->body_cap = 0;
 }
 
 ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
@@ -93,6 +103,25 @@ ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
             return CA_CORE_ERR_ARGS;
         }
     }
+
+    /* 请求体缓冲放在**所有校验之后**：这样失败路径不会留下已分配的
+     * 缓冲，也不用在每个 return 前面加一次 free。
+     *
+     * 钳制到 [16 KB, 4 MB]，0 取默认。钳制而不是报错——配置写大了
+     * 不该让代理起不来，但也不能悄悄分配一个远超内存预算的缓冲。
+     * 实际值由 ca_core_context_bytes() 暴露。 */
+    size_t cap = cfg->context_bytes;
+    if (cap == 0) cap = CA_CORE_DEFAULT_CONTEXT_BYTES;
+    if (cap < CA_CORE_MIN_CONTEXT_BYTES) cap = CA_CORE_MIN_CONTEXT_BYTES;
+    if (cap > CA_CORE_MAX_CONTEXT_BYTES) cap = CA_CORE_MAX_CONTEXT_BYTES;
+    c->body = (char *)malloc(cap);
+    if (c->body == NULL) {
+        core_note(c, "请求缓冲分配失败");
+        return CA_CORE_ERR_NOMEM;
+    }
+    c->body_cap = cap;
+    /* cfg 里的原值不再有意义：后面只认 body_cap。 */
+    c->cfg.context_bytes = cap;
     return CA_CORE_OK;
 }
 
@@ -173,53 +202,106 @@ static int on_data(const unsigned char *data, size_t n, void *user) {
  *
  * 这个区分是必要的：把同一条用户输入既放进历史又当作尾随消息，
  * 模型会看到重复的问题，回答也会开始重复。
+ *
+ * 历史放不下时不在这里处理——core_one_turn 会从**最旧的一端**丢弃
+ * 完整轮次后重试。构造器只负责如实报告「需要多少字节」。
  */
-static int core_build_body(ca_core *c, const char *user_text,
-                           int user_in_history, char *body, size_t cap,
-                           size_t *need) {
-    if (c->cfg.session == NULL) {
-        ca_llm_request req;
-        req.api_base = c->cfg.api_base;
-        req.model = c->cfg.model;
-        req.system = c->cfg.system;
-        req.user = user_text;
-        return ca_llm_build_request(body, cap, &req, need);
-    }
-
-    /* +1 给尾随的工具结果消息。栈上 8 KB 左右，不放进 ca_core
+static void core_collect_msgs(ca_core *c, const char *user_text,
+                              int user_in_history, ca_llm_msg *msgs,
+                              size_t *out_n) {
+    /* +1 给尾随的工具结果消息。栈上约 8 KB，不放进 ca_core
      * ——ca_core 已经很大，再塞进去只会让「别把 ca_core 放栈上」更危险。 */
     static const size_t kMaxMsgs = CA_SESSION_MAX_MSGS + 1;
-    ca_llm_msg msgs[CA_SESSION_MAX_MSGS + 1];
     size_t n = 0;
-    ca_session_export(c->cfg.session, msgs, &n);
-    if (n > CA_SESSION_MAX_MSGS) n = CA_SESSION_MAX_MSGS; /* 防御，不可能发生 */
-    if (!user_in_history) {
+    if (c->cfg.session != NULL) {
+        ca_session_export(c->cfg.session, msgs, &n);
+        if (n > CA_SESSION_MAX_MSGS) n = CA_SESSION_MAX_MSGS; /* 防御，不可能发生 */
+    }
+    if (n == 0) {
+        /* 无会话（单轮模式），或历史为空（例如空输入没被记进历史）：
+         * 这一条就是全部上下文。**不能**因为 user_in_history=1 就什么都不放——
+         * 空请求体会让每一轮都报「超出上下文上限」。 */
+        msgs[0].role = CA_MSG_USER;
+        msgs[0].text = user_text;
+        n = 1;
+    } else if (!user_in_history) {
         if (n >= kMaxMsgs) n = kMaxMsgs - 1;
         msgs[n].role = CA_MSG_USER;
         msgs[n].text = user_text;
         n++;
     }
-    return ca_llm_build_request_msgs(body, cap, c->cfg.model, c->cfg.system,
-                                     msgs, n, need);
+    *out_n = n;
+}
+
+/* 从 drop 开始往后找到**下一个完整轮次的起点**（user 消息）。
+ * 直接丢一条 assistant 回复会留下「问而不答」的残局，模型会接着
+ * 自言自语；按轮次对齐才是安全的淘汰单位。 */
+static size_t core_next_turn(const ca_llm_msg *msgs, size_t n, size_t drop) {
+    size_t i = drop + 1;
+    while (i < n && msgs[i].role != CA_MSG_USER) i++;
+    return i;
 }
 
 static ca_core_status core_one_turn(ca_core *c, const char *user_text,
                                     int user_in_history) {
-    char body[CA_CORE_MAX_REQUEST];
-    size_t need = 0;
+    ca_llm_msg msgs[CA_SESSION_MAX_MSGS + 1];
+    size_t nmsg = 0;
+    core_collect_msgs(c, user_text, user_in_history, msgs, &nmsg);
 
-    int rc = core_build_body(c, user_text, user_in_history, body, sizeof(body),
-                             &need);
-    if (rc == -1) { core_note(c, "请求参数非法"); return CA_CORE_ERR_ARGS; }
-    if (rc == -2) {
-        /* 缓冲不足：明确报需要多少，**不截断**。
-         * 半个请求体会被服务端当成协议错误，报错还更难懂。 */
-        char msg[128];
-        snprintf(msg, sizeof(msg), "请求体需要 %lu 字节，上限 %u。",
-                 (unsigned long)need, (unsigned)CA_CORE_MAX_REQUEST);
+    size_t drop = 0;
+    size_t need = 0;
+    for (;;) {
+        int rc = ca_llm_build_request_msgs(c->body, c->body_cap, c->cfg.model,
+                                           c->cfg.system, msgs + drop,
+                                           nmsg - drop, &need);
+        if (rc != -2) {
+            if (rc == -1) { core_note(c, "请求参数非法"); return CA_CORE_ERR_ARGS; }
+            break;
+        }
+        /* 缓冲不足：丢掉最旧的完整轮次再试。
+         * 没有会话（单轮模式）时无可丢弃，直接报错。 */
+        if (c->cfg.session == NULL) {
+            drop = nmsg;
+            break;
+        }
+        size_t next = core_next_turn(msgs, nmsg, drop);
+        if (next >= nmsg) {
+            /* 只剩最后一轮（或只有一条消息）也放不下：这是**单轮内容**
+             * 超限，不是历史太长。此时截断请求体只会让模型看到半截输入，
+             * 明确报错并给出可操作的建议才对。 */
+            drop = nmsg;
+            break;
+        }
+        drop = next;
+    }
+    if (drop >= nmsg) {
+        char msg[192];
+        /* 建议必须和当前模式对得上：单轮模式（`--prompt`）里没有 `/new`，
+         * 告诉用户敲一个不存在的命令等于把人往死路上指。 */
+        if (c->cfg.session != NULL) {
+            snprintf(msg, sizeof(msg),
+                     "单轮内容超出上下文上限 %lu 字节（需要 %lu 字节），"
+                     "请缩短输入，或用 /new 开新会话。",
+                     (unsigned long)c->body_cap, (unsigned long)need);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "单轮内容超出上下文上限 %lu 字节（需要 %lu 字节），"
+                     "请缩短输入。",
+                     (unsigned long)c->body_cap, (unsigned long)need);
+        }
         core_note(c, msg);
         return CA_CORE_ERR_LIMIT;
     }
+    if (drop > 0 && !c->context_notified) {
+        /* 与契约 T3 一致：淘汰必须说出来。只报一次（本轮第一次需要淘汰时），
+         * 之后继续淘汰不再重复刷屏；会话层自己的淘汰另有提示。 */
+        c->context_notified = 1;
+        ca_ui_printf(c->cfg.ui,
+                     "（上下文超出 %lu 字节上限，已丢弃最早的 %lu 条消息）\n",
+                     (unsigned long)c->body_cap, (unsigned long)drop);
+    }
+
+    const char *body = c->body;
 
     /* 鉴权头由 init 拼好，可能为空。
      * 空时把这一项写成 NULL —— 传输层按「遇到 NULL 即结束」遍历，
@@ -358,6 +440,7 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
     c->rounds = 0;
     c->slot_count = 0;
     c->last_error[0] = '\0';
+    c->context_notified = 0;
 
     /* 工具输出缓冲：1 MB（与契约 §2.1 一致） */
     if (ca_out_init(&c->tout, c->tool_out, sizeof(c->tool_out)) != 0) {

@@ -40,8 +40,27 @@ extern "C" {
 #define CA_CORE_MAX_RESULT_BYTES (256u * 1024u)
 
 /* API key 长度上限。超长一律拒绝，**不截断**——
- * 截断后的 key 只会在服务端换来一个 401，而用户会以为是自己填错了。 */
+ * 截断后的 key 只会在服务端换来一个 401，而用户会以为自己填错了。 */
 #define CA_CORE_MAX_KEY_BYTES 512
+
+/* 单次请求体（含历史）的字节上限。
+ *
+ * 为什么它必须可配置：这个数字同时决定两件事——
+ *   1. 内存上限（一块定长缓冲，不随对话增长）；
+ *   2. 每次请求要花多少 token（用户的钱）与服务商上下文是否能装下。
+ * 两者没有普适答案：本地小模型可能只吃得下 32 KB，128k 上下文的服务
+ * 可以给到几 MB。写死一个数字，必然对其中一端是错的。
+ *
+ * 历史早先写死 16384，结果是**约 50 轮短对话**或**一次超过 16 KB 的
+ * 工具结果**之后，每一轮都失败——对话直接不可用。上限本身不是问题，
+ * 「超了就不许继续聊」才是。现在的行为是：超限时丢弃最早的完整轮次
+ * 直到放得下，并明确告诉用户丢了多少（与契约 T3 一致）。
+ *
+ * 默认 256 KB ≈ 6~7 万汉字，够日常编码与读一个中等文件；
+ * 硬上限 4 MB 与契约 §2.1 的会话历史窗口一致，再大就该开新会话了。 */
+#define CA_CORE_DEFAULT_CONTEXT_BYTES (256u * 1024u)
+#define CA_CORE_MIN_CONTEXT_BYTES (16u * 1024u)
+#define CA_CORE_MAX_CONTEXT_BYTES (4u * 1024u * 1024u)
 
 typedef enum {
     CA_CORE_OK = 0,
@@ -71,6 +90,11 @@ typedef struct {
      * 并在构造请求时把历史带上。历史的上限与淘汰全在 session 层，
      * core 不参与判定——两处各判一次，迟早会不一致。 */
     ca_session *session;
+
+    /* 单次请求体上限（字节）。0 = 用 CA_CORE_DEFAULT_CONTEXT_BYTES。
+     * 超出 [MIN, MAX] 会被钳制，而不是报错——一个过大的数字不该让
+     * 代理拒绝启动，钳制后的实际值会通过 ca_core_context_bytes() 暴露。 */
+    size_t context_bytes;
 } ca_core_config;
 
 /* 运行期状态。全部定长，不做无界增长。 */
@@ -101,12 +125,30 @@ typedef struct {
     int saw_text;           /* 本轮是否有增量文本（决定要不要开流） */
     int saw_tool;           /* 本轮是否有工具调用 */
     char last_error[256];
+
+    /* 请求体缓冲：按 cfg.context_bytes 在 init 时分配一次。
+     * 不放进 ca_core 的定长区——4 MB 的字段会让 ca_core 无法安全地
+     * 出现在任何栈上，而这个结构已经在 1 MB 工具输出附近了。 */
+    char *body;
+    size_t body_cap;
+    int context_notified;   /* 本轮是否已经提示过「丢弃了历史」 */
 } ca_core;
 
 const char *ca_core_status_text(ca_core_status s);
 
-/* 初始化。不发起任何网络请求。 */
+/* 实际生效的请求体上限（钳制后）。测试与 UI 用它显示真实值。 */
+size_t ca_core_context_bytes(const ca_core *c);
+
+/* 初始化。不发起任何网络请求。
+ *
+ * 前置条件：`c` 要么是全新内存，要么**先调过 ca_core_free**。
+ * init 会从堆上分配请求体缓冲（默认 256 KB），直接对同一个 `c`
+ * 再 init 一次会泄漏上一块——`ca_core` 太大不能放栈上，这个前提
+ * 只能由调用方保证（本仓库的测试 setup 就先 free 再 init）。 */
 ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg);
+
+/* 释放 init 分配的资源。可重复调用；不释放 cfg 里由调用方持有的指针。 */
+void ca_core_free(ca_core *c);
 
 /* 处理一次用户输入，含完整的工具执行循环。
  *
