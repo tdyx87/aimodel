@@ -326,6 +326,58 @@ static void make_test_dir(char *buf, size_t cap) {
              base, (char)SEP_CHAR, (unsigned long)time(NULL));
 }
 
+CA_TEST(session_save_overwrites_previous_file) {
+    /* 同一个会话反复保存必须**替换**旧文件，而不是「第一次成功、之后全失败」。
+     *
+     * 这不是假想：MSVC 的 rename() 在目标已存在时直接失败，而 POSIX
+     * 的 rename() 会原子覆盖。早先只用 rename()，于是 Windows 上
+     * 从第二轮起每次保存都返回 -1（调用方还忽略了返回值），
+     * 文件永远停在第一轮——`/resume` 等于丢掉整段对话。
+     *
+     * 注意这条在 Linux/macOS 上**改前改后都是绿的**：它守的是
+     * Windows 分支。这正是要把它写进测试的原因。 */
+    char dir[CA_SESSION_MAX_PATH];
+    snprintf(dir, sizeof(dir), "%s%ccagent_sess_test_%lu_overwrite",
+             (getenv("TEMP") != NULL ? getenv("TEMP")
+                                     : (getenv("TMPDIR") != NULL ? getenv("TMPDIR") : ".")),
+             (char)SEP_CHAR, (unsigned long)time(NULL));
+    CA_ASSERT_EQ_INT(ca_session_dir_ensure(dir), 0);
+
+    ca_session s;
+    CA_ASSERT_EQ_INT(ca_session_init(&s, 8192), 0);
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, "第一问"), 0);
+    CA_ASSERT_EQ_INT(ca_session_append_delta(&s, "第一答"), 0);
+    CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+
+    CA_ASSERT_EQ_INT(ca_session_add(&s, CA_MSG_USER, "第二问"), 0);
+    CA_ASSERT_EQ_INT(ca_session_append_delta(&s, "第二答"), 0);
+    /* 关键断言：第二次保存必须成功（目标文件已存在） */
+    CA_ASSERT_EQ_INT(ca_session_save(&s, dir), 0);
+
+    ca_session_info list[8];
+    size_t n = 0;
+    CA_ASSERT_EQ_INT(ca_session_list(dir, list, 8, &n), 1);
+    CA_ASSERT_EQ_INT(n, 1);
+    /* 文件里必须是**四条**消息，不是上一版的两条 */
+    CA_ASSERT_EQ_INT(list[0].msgs, 4);
+
+    ca_session back;
+    CA_ASSERT_EQ_INT(ca_session_init(&back, 8192), 0);
+    CA_ASSERT_EQ_INT(ca_session_load(&back, list[0].path), 0);
+    CA_ASSERT_EQ_INT(ca_session_count(&back), 4);
+    /* 断言失败不会中断用例，所以这里**必须先判空**：
+     * 直接 strcmp(ca_session_text(...)) 在载入失败时是对 NULL 解引用——
+     * 负向验证时真的崩了（0xC0000005），崩溃会把失败原因盖掉。 */
+    const char *t2 = ca_session_text(&back, 2);
+    const char *t3 = ca_session_text(&back, 3);
+    CA_ASSERT(t2 != NULL && strcmp(t2, "第二问") == 0);
+    CA_ASSERT(t3 != NULL && strcmp(t3, "第二答") == 0);
+
+    CA_ASSERT_EQ_INT(ca_session_delete(dir, s.id), 0);
+    ca_session_free(&back);
+    ca_session_free(&s);
+}
+
 CA_TEST(session_saves_lists_loads_and_deletes) {
     char dir[CA_SESSION_MAX_PATH];
     make_test_dir(dir, sizeof(dir));
@@ -610,6 +662,7 @@ int main(void) {
         {"session_json_load_truncates_oversized_message", ca_test_run_session_json_load_truncates_oversized_message},
         {"session_json_to_json_rejects_small_buffer", ca_test_run_session_json_to_json_rejects_small_buffer},
         {"session_saves_lists_loads_and_deletes", ca_test_run_session_saves_lists_loads_and_deletes},
+        {"session_save_overwrites_previous_file", ca_test_run_session_save_overwrites_previous_file},
         {"session_saved_file_has_no_key", ca_test_run_session_saved_file_has_no_key},
         {"session_list_sorts_newest_first", ca_test_run_session_list_sorts_newest_first},
         {"session_corrupt_file_is_listed_not_fatal", ca_test_run_session_corrupt_file_is_listed_not_fatal},

@@ -9,6 +9,8 @@
  *   CAGENT_MODEL     必填，服务端模型名
  *   CAGENT_API_KEY   可选（本地无鉴权服务可不填）
  *   CAGENT_SYSTEM    可选，系统提示
+ *   CAGENT_ALLOW_SHELL  可选，设为 1 才允许执行命令
+ *   CAGENT_CONTEXT_BYTES 可选，单次请求上限（默认 256 KB，超限丢弃最旧轮次）
  *
  * 密钥只存在于进程内存：**不打印、不落盘**（PRD NFR-3）。
  */
@@ -61,7 +63,8 @@ static void print_usage(FILE *f) {
             "  CAGENT_MODEL      必填，模型名\n"
             "  CAGENT_API_KEY    可选，鉴权用；不填则不发送 Authorization\n"
               "  CAGENT_SYSTEM    可选，系统提示\n"
-              "  CAGENT_ALLOW_SHELL  可选，设为 1 才允许模型执行命令（默认拒绝）\n"
+            "  CAGENT_ALLOW_SHELL  可选，设为 1 才允许模型执行命令（默认拒绝）\n"
+            "  CAGENT_CONTEXT_BYTES  可选，单次请求上限（字节，默认 262144，范围 16K~4M）\n"
               "\n"
               "模型要写文件或执行命令时，会先把具体内容列出来并问 [y/N]，\n"
               "只有明确输入 y 才会执行。\n"
@@ -104,9 +107,17 @@ static const char *cmd_arg(const char *line) {
     return (*p == '\0') ? NULL : p;
 }
 
+/* 落盘失败必须说出来。早先这里 `(void)` 掉了返回值，于是 Windows 上
+ * rename() 因为目标已存在而失败时，每一轮都静默丢弃保存：
+ * 文件永远停在第一轮，用户以为会话还在（本缺陷就是这样被压了整轮开发）。 */
+static int g_save_warned;
+
 static void save_session_quietly(void) {
-    if (g_sess_dir_ok && ca_session_count(&g_session) > 0) {
-        (void)ca_session_save(&g_session, g_sess_dir);
+    if (!g_sess_dir_ok || ca_session_count(&g_session) == 0) return;
+    if (ca_session_save(&g_session, g_sess_dir) != 0 && !g_save_warned) {
+        g_save_warned = 1;
+        fprintf(stderr, "警告：会话未能写入 %s，本次对话退出后不会保留。\n",
+                g_sess_dir);
     }
 }
 
@@ -358,6 +369,21 @@ int main(int argc, char **argv) {
     g_allow_shell = (allow_shell != NULL && allow_shell[0] != '\0' &&
                      strcmp(allow_shell, "0") != 0);
 
+    /* 请求上限（字节）。不填用默认值；写了非数字就明说并按默认走——
+     * 静默忽略一个配置项，用户会一直以为它生效了。 */
+    size_t context_bytes = 0;
+    const char *ctx_env = getenv("CAGENT_CONTEXT_BYTES");
+    if (ctx_env != NULL && ctx_env[0] != '\0') {
+        char *end = NULL;
+        unsigned long v = strtoul(ctx_env, &end, 10);
+        if (end == ctx_env || *end != '\0' || v == 0) {
+            fprintf(stderr, "%s\n",
+                    "CAGENT_CONTEXT_BYTES 不是正整数，已改用默认上限（262144）。");
+        } else {
+            context_bytes = (size_t)v;
+        }
+    }
+
     if (base == NULL || base[0] == '\0' || model == NULL || model[0] == '\0') {
         print_usage(stderr);
         return 2;
@@ -441,6 +467,9 @@ int main(int argc, char **argv) {
      * 传 NULL 会让所有工具无条件被拒(提示照出、y 无效)，所以必须接上。 */
     cfg.perm = main_perm;
     cfg.perm_user = &ui;
+    /* 单次请求上限：0 表示用默认（256 KB）。core 会把它钳制到
+     * [16 KB, 4 MB]，钳制后的真实值从 ca_core_context_bytes() 取。 */
+    cfg.context_bytes = context_bytes;
 
     /* 会话（US-6）：预算传 0 → 用契约规定的历史上限。
      * 拿不到会话目录不算致命：降级为「只在内存里记得」，
@@ -467,6 +496,10 @@ int main(int argc, char **argv) {
 
     if (ui.is_tty) {
         ca_ui_line(&ui, k_banner);
+        /* 上下文上限决定「聊多久会开始丢历史」。用户有权在开始前知道，
+         * 而不是在历史被丢之后才从提示里猜。 */
+        ca_ui_printf(&ui, "上下文上限：%lu KB\n",
+                     (unsigned long)(ca_core_context_bytes(&g_core) / 1024u));
         /* 工具能写到哪里、会话存在哪里，用户一进来就该看得见：
          * 批准写入时若不知道工作区是哪个目录，那个「同意」是盲目的。 */
         ca_ui_printf(&ui, "工作区：%s\n", cwd);
@@ -523,6 +556,7 @@ int main(int argc, char **argv) {
         ca_ui_line(&ui, "会话未落盘（无法确定会话目录），退出后不保留。");
     }
     ca_session_free(&g_session);
+    ca_core_free(&g_core);
 
     if (tr->cleanup != NULL) tr->cleanup();
     ca_ui_shutdown(&ui); /* 必须在任何退出路径上还原终端 */

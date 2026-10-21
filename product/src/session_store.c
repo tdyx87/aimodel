@@ -38,6 +38,7 @@
 #  include <io.h>
 #  include <sys/stat.h>
 #  include <sys/types.h>
+#  include <windows.h> /* MoveFileExA：见 ca_session_save 里的改名说明 */
 #  define CA_MKDIR(p) _mkdir(p)
 #  define CA_SEP '\\'
 #else
@@ -194,10 +195,27 @@ int ca_session_save(ca_session *s, const char *dir) {
      * Windows 侧不需要：%APPDATA% 本身就已经是「只限本用户」的。 */
     (void)chmod(tmp, 0600);
 #endif
+    /* 用临时名 + 改名的原因见文件头第 3 条：直接覆盖时中途失败会留下半个文件。
+     *
+     * **但 POSIX 与 Windows 的改名语义不同**：POSIX 的 rename() 原子地
+     * 覆盖已存在的目标；MSVC 的 rename() 在目标存在时**直接失败**。
+     * 早先只用 rename()，于是 Windows 上「第一轮存得下、之后每一次都
+     * 静默失败」——每轮保存都返回 -1 而调用方忽略返回值，文件永远停在
+     * 第一次保存的内容，`/resume` 等于丢掉整段对话。
+     *
+     * 所以：Windows 走 MoveFileEx(MOVEFILE_REPLACE_EXISTING)，
+     * POSIX 保持 rename()。两条路都是「替换」语义，不是「追加」。 */
+#if defined(_WIN32)
+    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+        remove(tmp);
+        return -1;
+    }
+#else
     if (rename(tmp, path) != 0) {
         remove(tmp);
         return -1;
     }
+#endif
     return 0;
 }
 
