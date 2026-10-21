@@ -76,9 +76,9 @@ static void on_sigint(int sig) {
 #endif
 }
 
-static const char *k_banner =
-    "cagent —— 低内存终端代理（C99）\n"
-    "输入 /help 查看命令，/exit 退出。\n";
+/* 启动画面已改为「标题 + 键值行」（见 ca_ui_heading/ca_ui_kv），
+ * 原来的 k_banner 常量随之删除——留着会变成未使用变量，
+ * 而「零告警」是 CI 硬门禁。 */
 
 static void print_usage(FILE *f) {
     fprintf(f,
