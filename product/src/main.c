@@ -465,7 +465,15 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    if (ui.is_tty) ca_ui_line(&ui, k_banner);
+    if (ui.is_tty) {
+        ca_ui_line(&ui, k_banner);
+        /* 工具能写到哪里、会话存在哪里，用户一进来就该看得见：
+         * 批准写入时若不知道工作区是哪个目录，那个「同意」是盲目的。 */
+        ca_ui_printf(&ui, "工作区：%s\n", cwd);
+        ca_ui_printf(&ui, "会话：%s\n",
+                     g_sess_dir_ok ? g_sess_dir
+                                   : "（目录不可用，仅保存在内存中，退出即丢失）");
+    }
     static char line[CA_MAIN_INPUT_MAX];
     int exit_code = 0;
 

@@ -426,6 +426,30 @@ jobs:
           fi
           cat toolsmoke.log
 
+      # 文档里写的入口必须**被真的跑过**，否则等于没有入口。
+      # 独立目录 + 仅 Ubuntu：代价是几分钟，换来「build.sh 真的能配置/构建/测试」。
+      - name: 文档入口冒烟（scripts/build.sh）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          CAGENT_BUILD_DIR=build-sh ./scripts/build.sh Release > buildsh.log 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            {
+              echo '### ❌ scripts/build.sh 失败'
+              echo '```'; tail -c 4000 buildsh.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 8 ] && break
+              echo "::error title=build.sh#$n::$line"
+            done < <(tail -12 buildsh.log)
+            exit 1
+          fi
+          grep -E 'tests passed|Test #' buildsh.log | tail -5
+
       - name: 工具链指纹（失败时也打印）
         if: always()
         shell: bash
