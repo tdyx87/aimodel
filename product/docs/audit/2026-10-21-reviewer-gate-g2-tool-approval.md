@@ -23,10 +23,11 @@
 | R5 | `ui_clear_waiting` 里 `"\r\x1b[2K"` 实为 **5** 字节，代码写死 4，擦行序列被截断成 `ESC[2`，会吃掉后续内容首字符 | 中 | 改用 `sizeof(erase)-1`；用例 `ui_wait_hint_is_erased_by_first_output` 抓到 |
 | R6 | 批准后 `write_file` 先解析内容（上限 1 MB 的 malloc）再问权限，拒绝路径多一次分配 | 低 | 可接受：分配失败返回明确错误，且不再有「先执行后询问」 |
 | R7 | 启动横幅显示工作区/会话目录仅在 TTY，管道输出保持干净 | 低 | 符合 §7 降级，无需改 |
+| R8 | `scripts/build.sh` 模式为 100644（无执行位），文档写的 `./scripts/build.sh Release` 在全新 Linux clone 上 `Permission denied` | 中 | 由新增的 CI「文档入口冒烟」首跑暴露；`update-index --chmod=+x` → 100755，复跑绿（`3873bf5`） |
 
 ## 3. 产出（结论回到产物）
 
-- R2/R3/R4/R5 的修复与用例：提交 `782614f`（tools 展示）、`069c035`（批准通道 + 构建）、`8c1e7b0`（等待提示）
+- R2/R3/R4/R5 的修复与用例：提交 `782614f`（tools 展示）、`069c035`（批准通道 + 构建）、`8c1e7b0`（等待提示）；R8：`3873bf5`
 - 复查命令与结果：`ctest --test-dir build-curl -C Release` → **8/8**；
   `core_test` 18 例 / 78 检查；`tools_test` 115 检查；`ui_test` 50 检查；零告警
 - 三个冒烟：`curl_smoke` PASS / `session_smoke` PASS / `tool_smoke` PASS
