@@ -629,6 +629,52 @@ CA_TEST(edit_pending_display_shows_impact) {
     ca_ws_free(ws);
 }
 
+CA_TEST(write_pending_display_shows_path_and_content) {
+    /* 契约 P2：确认提示必须展示工具名与**完整参数**。
+     * 早先 write_file 什么都没设，用户只看到「write_file 请求。允许执行？」，
+     * 不知道写哪个文件、写什么——那是最常见的破坏性操作，不能盲批。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    g_seen_pending[0] = '\0';
+    ca_tool_ctx ctx = make_ctx(ws, perm_capture);
+    g_perm_user_ptr = &ctx;
+    (void)ca_tool_write_file(
+        &ctx, "{\"path\":\"p2.txt\",\"content\":\"MARKER-CONTENT\"}");
+    CA_ASSERT(strstr(g_seen_pending, "p2.txt") != NULL);
+    CA_ASSERT(strstr(g_seen_pending, "MARKER-CONTENT") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(write_pending_display_marks_truncation) {
+    /* 内容很大时只展示开头，但必须**明确标注**总长度——
+     * 不标注的截断等于让用户以为看全了。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    static char big_args[8192];
+    static const char tail[] = "TAIL-MARKER\"}";
+    const char *head = "{\"path\":\"p3.txt\",\"content\":\"";
+    size_t hl = strlen(head);
+    memset(big_args, 'a', sizeof(big_args) - 1);
+    big_args[sizeof(big_args) - 1] = '\0';
+    memcpy(big_args, head, hl);
+    /* 尾部放一个标记，确认它**不在**预览里（即真的截了） */
+    memcpy(big_args + sizeof(big_args) - 1 - (sizeof(tail) - 1), tail,
+           sizeof(tail) - 1);
+    for (size_t i = hl; i < sizeof(big_args) - 1 - (sizeof(tail) - 1); i++) {
+        big_args[i] = 'a';
+    }
+    g_seen_pending[0] = '\0';
+    ca_tool_ctx ctx = make_ctx(ws, perm_capture);
+    g_perm_user_ptr = &ctx;
+    (void)ca_tool_write_file(&ctx, big_args);
+    CA_ASSERT(strstr(g_seen_pending, "p3.txt") != NULL);
+    CA_ASSERT(strstr(g_seen_pending, "共") != NULL);      /* 标注了总量 */
+    CA_ASSERT(strstr(g_seen_pending, "仅前") != NULL);    /* 标注了省略 */
+    ca_ws_free(ws);
+}
+
 CA_TEST(edit_reports_no_match_without_touching_file) {
     make_edit_fixture("e6.txt", "content here\n");
     ca_workspace *ws = make_ws();
@@ -719,6 +765,8 @@ int main(void) {
         {"edit_refuses_ambiguous_match", ca_test_run_edit_refuses_ambiguous_match},
         {"edit_replace_all_works_when_explicit", ca_test_run_edit_replace_all_works_when_explicit},
         {"edit_asks_permission_before_writing", ca_test_run_edit_asks_permission_before_writing},
+    {"write_pending_display_shows_path_and_content", ca_test_run_write_pending_display_shows_path_and_content},
+    {"write_pending_display_marks_truncation", ca_test_run_write_pending_display_marks_truncation},
         {"edit_pending_display_shows_impact", ca_test_run_edit_pending_display_shows_impact},
         {"edit_reports_no_match_without_touching_file", ca_test_run_edit_reports_no_match_without_touching_file},
         {"edit_rejects_path_escape", ca_test_run_edit_rejects_path_escape},

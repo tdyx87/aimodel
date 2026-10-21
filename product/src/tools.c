@@ -583,17 +583,10 @@ ca_tool_status ca_tool_read_file(ca_tool_ctx *ctx, const char *args_json) {
 ca_tool_status ca_tool_write_file(ca_tool_ctx *ctx, const char *args_json) {
     if (ctx == NULL || ctx->out == NULL) return CA_TOOL_ERR_ARGS;
 
-    /* P1/P2：破坏性操作**先问权限**，且必须在解析参数之前——
-     * 否则等于先执行了才问。 */
-    if (check_perm(ctx, "write_file") != 0) {
-        /* P3：拒绝要回灌结构化结果，模型才能换个做法继续 */
-        ca_out_puts(ctx->out,
-                    "<result status=\"denied\" tool=\"write_file\">"
-                    "用户拒绝了这次写入操作。可以先说明你的意图，"
-                    "或改用其他方式。</result>");
-        return CA_TOOL_DENIED;
-    }
-
+    /* 解析参数放在问权限**之前**：契约 P2 要求确认提示展示「完整参数」。
+     * 解析没有副作用（不碰文件系统），先解析才可能把「写到哪、写什么」
+     * 摆到用户面前。run_shell 也是这样做的（先取出命令原文再问）。
+     * 真正有副作用的写盘仍然在权限之后。 */
     char path_in[CA_PATH_MAX];
     if (arg_string(args_json, "path", path_in, sizeof(path_in)) != 0) {
         return CA_TOOL_ERR_ARGS;
@@ -602,14 +595,58 @@ ca_tool_status ca_tool_write_file(ca_tool_ctx *ctx, const char *args_json) {
     size_t content_cap = CA_TOOL_RESULT_LIMIT;
     char *content = (char *)malloc(content_cap);
     if (content == NULL) return CA_TOOL_ERR_TOO_LARGE;
-    size_t content_len = 0;
     if (arg_string(args_json, "content", content, content_cap) != 0) {
         free(content);
         ca_out_puts(ctx->out, "<result error=\"内容超出上限或无法解析\"></result>");
         return CA_TOOL_ERR_TOO_LARGE;
     }
     /* arg_string 已写入 NUL，用 strlen 取长度——JSON 转义已解码 */
-    content_len = strlen(content);
+    size_t content_len = strlen(content);
+
+    /* P2/P5：把目标路径与要写的内容交给权限界面。
+     * 早先这里**什么都没设**（pending_display 为 NULL），用户看到的是
+     * 一句「write_file 请求。允许执行？」，既不知道写哪个文件也不知道
+     * 写什么——等于盲批。内容上限 1 MB，全量刷屏没用，所以只展示前
+     * 一段并**显式标注**总长度与省略量：不标注的截断才是欺骗。 */
+    {
+        const size_t preview_cap = 2048;
+        static char pending[4096];
+        size_t show = content_len < preview_cap ? content_len : preview_cap;
+        char *p = pending;
+        size_t cap = sizeof(pending);
+        int w = snprintf(p, cap, "将写入文件：%s\n内容 %llu 字节：\n\n",
+                         path_in[0] ? path_in : "(空路径)",
+                         (unsigned long long)content_len);
+        if (w < 0) w = 0;
+        if ((size_t)w < cap) {
+            p += w;
+            cap -= (size_t)w;
+            size_t n = show < cap - 1 ? show : cap - 1;
+            memcpy(p, content, n);
+            p += n;
+            cap -= n;
+        }
+        if (show < content_len) {
+            snprintf(p, cap, "\n[以上仅前 %lu 字节，共 %llu 字节]",
+                     (unsigned long)show, (unsigned long long)content_len);
+        } else if (cap > 1) {
+            snprintf(p, cap, "\n");
+        }
+        ctx->pending_display = pending;
+    }
+
+    /* P1/P2：破坏性操作必须**先问权限**，拿到了同意才动文件系统。 */
+    if (check_perm(ctx, "write_file") != 0) {
+        ctx->pending_display = NULL;
+        free(content);
+        /* P3：拒绝要回灌结构化结果，模型才能换个做法继续 */
+        ca_out_puts(ctx->out,
+                    "<result status=\"denied\" tool=\"write_file\">"
+                    "用户拒绝了这次写入操作。可以先说明你的意图，"
+                    "或改用其他方式。</result>");
+        return CA_TOOL_DENIED;
+    }
+    ctx->pending_display = NULL;
 
     char resolved[CA_PATH_MAX];
     size_t need = 0;
