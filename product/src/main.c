@@ -22,6 +22,11 @@
 #include "cagent/http.h"
 #include "cagent/mem.h"
 #include "cagent/tools.h"
+
+#if !defined(_WIN32)
+#  include <signal.h>
+#  include <unistd.h>
+#endif
 #include "cagent/transport_mem.h"
 #include "cagent/ui.h"
 
@@ -50,6 +55,26 @@ static ca_core g_core;
 static ca_session g_session;
 static char g_sess_dir[CA_SESSION_MAX_PATH];
 static int g_sess_dir_ok;
+/* 横幅要显示「连的是哪个模型」——不然用户分不清自己在跟谁说话。 */
+static const char *g_cfg_model_name = "";
+/* --probe：只做诊断，不进交互。 */
+static int g_want_probe;
+
+/* Ctrl-C 时的收尾：必须**先还原终端模式**再退出。
+ *
+ * 真实故障现场：程序进入原始模式（关回显）后被 Ctrl-C 打断，
+ * 而还原代码没机会执行 —— 用户的终端就留在「无回显」状态，
+ * 之后敲什么都不显示，终端看起来坏掉了。
+ * 这个 handler 存在的意义就是不让用户为我们的退出路径买单。 */
+static void on_sigint(int sig) {
+    (void)sig;
+    (void)ca_term_raw_exit();
+#if defined(_WIN32)
+    _exit(130);
+#else
+    _exit(130);
+#endif
+}
 
 static const char *k_banner =
     "cagent —— 低内存终端代理（C99）\n"
@@ -335,12 +360,125 @@ static void print_cli_help(void) {
            "\n"
            "  -h, --help     显示本帮助\n"
            "  -v, --version  显示版本与传输后端\n"
+           "  --probe        诊断：打印配置并做一次最小真实请求\n"
            "  （无选项）      进入交互会话；配置取自环境变量，见下\n"
            "\n");
     print_usage(stdout);
 }
 
+/* ---- 诊断：--probe ----
+ *
+ * 用户报「什么都不显示，只有一句请求失败」时，最需要的不是解释，
+ * 而是**事实**：地址对不对、模型名对不对、key 带没带、后端是什么、
+ * 服务端到底回了什么。
+ *
+ * --probe 做一次最小真实请求，把这些事实原样打印出来。
+ * 它**不打印 key**，响应体也只留前 200 字节做参考。
+ */
+
+typedef struct {
+    char buf[256];
+    size_t len;
+} probe_capture;
+
+static int probe_on_data(const unsigned char *data, size_t n, void *user) {
+    probe_capture *c = (probe_capture *)user;
+    if (c == NULL) return 0;
+    size_t room = sizeof(c->buf) - c->len - 1;
+    size_t take = (n < room) ? n : room;
+    memcpy(c->buf + c->len, data, take);
+    c->len += take;
+    c->buf[c->len] = '\0';
+    return 0;
+}
+
+static int run_probe(const char *base, const char *model, const char *key) {
+    printf("%s\n", "cagent 诊断（--probe）");
+    printf("  %s%s\n", "后端：", ca_transport_default() != NULL
+                                  ? "libcurl"
+                                  : "memory（未链接 libcurl，无法联网）");
+    printf("  %s%s\n", "地址：", base);
+    printf("  %s%s\n", "模型：", model);
+    printf("  %s%s\n", "密钥：", (key != NULL && key[0] != '\0')
+                                  ? "已设置（不显示内容）"
+                                  : "未设置（不会发送 Authorization）");
+    printf("  %s%s\n", "控制台：", ca_term_is_tty() ? "TTY（启用颜色与边框）"
+                                                    : "非 TTY（纯文本输出）");
+
+    char url[1024];
+    int n = snprintf(url, sizeof(url), "%s/chat/completions", base);
+    if (n <= 0 || (size_t)n >= sizeof(url)) {
+        printf("  %s%s\n", "结果：", "地址过长");
+        return 1;
+    }
+
+    char body[4096];
+    n = snprintf(body, sizeof(body),
+                 "{\"model\":\"%s\",\"stream\":true,\"messages\":[{\"role\":\"user\","
+                 "\"content\":\"ping\"}]}",
+                 model);
+    if (n <= 0 || (size_t)n >= sizeof(body)) {
+        printf("  %s%s\n", "结果：", "模型名过长");
+        return 1;
+    }
+
+    const char *hdr[4];
+    char auth[256];
+    hdr[0] = "Content-Type: application/json";
+    hdr[1] = "Accept: text/event-stream";
+    if (key != NULL && key[0] != '\0') {
+        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", key);
+        hdr[2] = auth;
+    } else {
+        hdr[2] = NULL;
+    }
+    hdr[3] = NULL;
+
+    const ca_transport_ops *tr = ca_transport_default();
+    if (tr == NULL) {
+        printf("  %s%s\n", "结果：", "本构建没有可联网的后端（未链接 libcurl）");
+        return 1;
+    }
+    if (tr->init != NULL) (void)tr->init();
+
+    ca_request req;
+    memset(&req, 0, sizeof(req));
+    req.method = "POST";
+    req.url = url;
+    req.body = body;
+    req.body_len = (size_t)n;
+    req.headers = hdr;
+
+    probe_capture cap;
+    cap.len = 0;
+    cap.buf[0] = '\0';
+
+    ca_http_status hs = tr->run(&req, probe_on_data, &cap);
+    long status = (tr->last_status_code != NULL) ? tr->last_status_code() : 0;
+
+    printf("  %s%ld\n", "HTTP 状态：", status);
+    printf("  %s%s\n", "传输结果：", ca_http_status_text(hs));
+    if (cap.len > 0) {
+        printf("  %s%s\n", "响应片段：", cap.buf);
+    }
+    if (tr->cleanup != NULL) tr->cleanup();
+
+    if (hs == CA_HTTP_OK) {
+        printf("  %s%s\n", "结论：", "连通性正常；若仍失败，看模型名、额度与工具配置");
+        return 0;
+    }
+    printf("  %s%s\n", "结论：", "请求未成功，见上面的传输结果与响应片段");
+    return 1;
+}
+
 int main(int argc, char **argv) {
+    /* Windows 控制台：把输出代码页设为 UTF-8 并打开 ANSI 支持。
+     * 不设的话，中文在简体中文控制台（代码页 936）上是乱码，
+     * 用户看到的现象是「界面什么都不显示」——与程序逻辑无关。 */
+    ca_term_setup_console();
+#if !defined(_WIN32)
+    (void)signal(SIGINT, on_sigint);
+#endif
     /* 选项必须在读环境变量之前处理：--version / --help 不该要求配置。 */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -352,6 +490,10 @@ int main(int argc, char **argv) {
         if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
             print_cli_help();
             return 0;
+        }
+        if (strcmp(a, "--probe") == 0) {
+            g_want_probe = 1;
+            continue;
         }
         fprintf(stderr, "%s%s%s\n", "未知选项：", a, "（试试 --help）");
         return 2;
@@ -387,6 +529,12 @@ int main(int argc, char **argv) {
     if (base == NULL || base[0] == '\0' || model == NULL || model[0] == '\0') {
         print_usage(stderr);
         return 2;
+    }
+    g_cfg_model_name = model;
+
+    if (g_want_probe) {
+        ca_term_setup_console();
+        return run_probe(base, model, key);
     }
 
     /* 离线自检模式（CAGENT_TRANSPORT=mem）：
@@ -495,17 +643,27 @@ int main(int argc, char **argv) {
     }
 
     if (ui.is_tty) {
-        ca_ui_line(&ui, k_banner);
-        /* 上下文上限决定「聊多久会开始丢历史」。用户有权在开始前知道，
-         * 而不是在历史被丢之后才从提示里猜。 */
-        ca_ui_printf(&ui, "上下文上限：%lu KB\n",
+        /* 启动画面用「标题 + 键值行」，让用户一进来就知道：
+         * 连的是谁、能聊多久、工具能写到哪、对话存在哪。
+         * 这些信息散落在纯文本里时，用户往往要找好几行才拼得出来。 */
+        ca_ui_heading(&ui, "cagent —— 低内存终端代理（C99）");
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%lu KB",
                      (unsigned long)(ca_core_context_bytes(&g_core) / 1024u));
-        /* 工具能写到哪里、会话存在哪里，用户一进来就该看得见：
-         * 批准写入时若不知道工作区是哪个目录，那个「同意」是盲目的。 */
-        ca_ui_printf(&ui, "工作区：%s\n", cwd);
-        ca_ui_printf(&ui, "会话：%s\n",
-                     g_sess_dir_ok ? g_sess_dir
-                                   : "（目录不可用，仅保存在内存中，退出即丢失）");
+            ca_ui_kv(&ui, "上下文上限", buf);
+        }
+        ca_ui_kv(&ui, "工作区", cwd);
+        ca_ui_kv(&ui, "会话", g_sess_dir_ok
+                             ? g_sess_dir
+                             : "（目录不可用，仅保存在内存中，退出即丢失）");
+        {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "%s  ·  模型 %s", ca_transport_name(),
+                     g_cfg_model_name);
+            ca_ui_kv(&ui, "后端/模型", buf);
+        }
+        ca_ui_note(&ui, "输入 /help 查看命令，/exit 退出。");
     }
     static char line[CA_MAIN_INPUT_MAX];
     int exit_code = 0;

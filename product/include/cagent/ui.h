@@ -74,6 +74,20 @@ void ca_ui_shutdown(ca_ui *ui);
 void ca_ui_line(ca_ui *ui, const char *s);   /* 一行，自动补 \n */
 void ca_ui_printf(ca_ui *ui, const char *fmt, ...);
 
+/* ---- 视觉增强（仅 TTY 生效）----
+ *
+ * 非 TTY 路径必须保持纯文本：CI 消费者会逐行比对，装饰性输出会变成噪音。
+ * 所以下面这些函数在 is_tty == 0 时退化成普通文本输出。
+ *
+ * 颜色用 ANSI SGR，TTY 之外不写任何转义序列。 */
+void ca_ui_heading(ca_ui *ui, const char *title);  /* 章节标题（带下划线） */
+void ca_ui_panel(ca_ui *ui, const char *title, const char *body); /* 盒面板 */
+void ca_ui_kv(ca_ui *ui, const char *key, const char *value);    /* 键值行 */
+void ca_ui_ok(ca_ui *ui, const char *text);        /* 成功（绿） */
+void ca_ui_warn(ca_ui *ui, const char *text);      /* 警告（黄） */
+void ca_ui_error(ca_ui *ui, const char *text);     /* 错误（红） */
+void ca_ui_note(ca_ui *ui, const char *text);      /* 次要信息（灰） */
+
 /* ---- 流式输出（契约 §7：逐 token 追加，不做全量重绘）----
  *
  * begin/token/end 三个动作。TUI 下 token 会覆盖同一行并重绘光标，
@@ -103,9 +117,18 @@ ca_ui_decision ca_ui_confirm(ca_ui *ui, const char *tool, const char *text);
 int  ca_term_is_tty(void);
 
 /* 进入/退出原始模式。非 TTY 下两者都是**安全的空操作**，
- * 而不是失败——契约 §7 要求「原始模式不可用时必须能降级」。 */
+ * 而不是失败——契约 §7 要求「原始模式不可用时必须能降级」。
+ *
+ * ca_term_raw_exit 必须能在**信号处理函数**里调用：用户按 Ctrl-C 时
+ * 进程会立刻结束，此时若不还原控制台模式，用户的终端会留在
+ * 「无回显」状态——之后敲什么都不显示，终端看起来坏掉了。 */
 int  ca_term_raw_enter(void);
 int  ca_term_raw_exit(void);
+
+/* 控制台准备：Windows 上把输出代码页设为 UTF-8 并打开 ANSI 支持。
+ * 不设的话，中文在简体中文控制台（代码页 936）上是乱码——
+ * 用户看到的现象是「界面什么都不显示」，与程序逻辑无关。 */
+void ca_term_setup_console(void);
 
 /* 默认 sink / src，供 main 使用。 */
 void ca_term_default_sink(ca_ui_sink *out);

@@ -319,6 +319,36 @@ static void core_note_http_error(ca_core *c, long status, const char *raw,
     core_note(c, fallback);
 }
 
+/* 传输层失败（连不上 / TLS 不对 / 超时 / 被中止）时给出**可行动**的说明。
+ *
+ * 真实故障现场：域名拼错或网络不通时，界面只显示「请求失败」——
+ * 用户完全不知道该改地址、改代理还是改证书。必须把原因和目标地址一起
+ * 说出来（地址只含主机部分，不含 key）。
+ *
+ * ca_http_status_text() 已经把这些情形翻译成人话，这里再补上主机名。 */
+static void core_note_transport_error(ca_core *c, ca_http_status hs) {
+    const char *base = ca_http_status_text(hs);
+    char host[128];
+    host[0] = '\0';
+    if (c->url != NULL) {
+        const char *p = strstr(c->url, "://");
+        p = (p != NULL) ? p + 3 : c->url;
+        size_t i = 0;
+        while (p[i] != '\0' && p[i] != '/' && p[i] != '?' && i + 1 < sizeof(host)) {
+            host[i] = p[i];
+            i++;
+        }
+        host[i] = '\0';
+    }
+    if (host[0] != '\0') {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "%s（目标：%s）", base, host);
+        core_note(c, msg);
+    } else {
+        core_note(c, base);
+    }
+}
+
 static ca_core_status core_one_turn(ca_core *c, const char *user_text,
                                     int user_in_history) {
     ca_llm_msg msgs[CA_SESSION_MAX_MSGS + 1];
@@ -446,7 +476,29 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
          * （错误体不像 SSE，分帧器直接跳过）——所以这条分支才是
          * 「额度不足/模型过载」真正走到的地方。 */
         if (c->last_error[0] == '\0') {
-            core_note_http_error(c, core_http_status(c), t.raw, "请求失败");
+            if (hs == CA_HTTP_ERR_PROTOCOL) {
+                long status = core_http_status(c);
+                char reason[160];
+                if (status >= 400 &&
+                    core_error_reason(t.raw, reason, sizeof(reason))) {
+                    /* 服务端给了可读原因（额度不足、模型过载、key 过期…） */
+                    char msg[256];
+                    snprintf(msg, sizeof(msg), "HTTP %ld: %s", status, reason);
+                    core_note(c, msg);
+                } else if (status >= 400) {
+                    /* 4xx 但没有可读原因（常见于网关错误页）：
+                     * 至少把状态码说出来，别只剩一句「请求失败」。 */
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "HTTP %ld %s", status,
+                             "（服务端没有返回可读原因）");
+                    core_note(c, msg);
+                } else {
+                    core_note(c, "服务返回了无法解析的内容");
+                }
+            } else {
+                /* 连接/TLS/超时/中止：说清楚是哪一种，并带上目标主机。 */
+                core_note_transport_error(c, hs);
+            }
         }
         return (hs == CA_HTTP_ERR_PROTOCOL) ? CA_CORE_ERR_PROTOCOL
                                              : CA_CORE_ERR_TRANSPORT;
@@ -593,8 +645,14 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
         ca_core_status st = core_one_turn(c, turn_input, user_in_history);
         if (st != CA_CORE_OK) {
             ca_ui_line(c->cfg.ui, "");
-            ca_ui_printf(c->cfg.ui, "错误：%s\n",
+            {
+                /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，
+                 * 而「零告警」是 CI 硬门禁。中文一律作为参数传。 */
+                char msg[320];
+                snprintf(msg, sizeof(msg), "%s%s", "错误：",
                          c->last_error[0] ? c->last_error : ca_core_status_text(st));
+                ca_ui_error(c->cfg.ui, msg);
+            }
             return st;
         }
         ca_ui_line(c->cfg.ui, "");
@@ -625,22 +683,39 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
             }
             if (s->args_len == 0 || s->name[0] == '\0') continue;
 
-            ca_ui_printf(c->cfg.ui, "\n[调用工具 %s]\n", s->name);
+            {
+                /* 工具调用是「代理要动手了」的时刻，必须一眼可见。
+                 * TTY 下用盒面板；非 TTY 保持原来的一行文本（CI 友好）。 */
+                char title[128];
+                snprintf(title, sizeof(title), "调用工具 %s", s->name);
+                if (c->cfg.ui->is_tty) {
+                    ca_ui_line(c->cfg.ui, "");
+                    ca_ui_panel(c->cfg.ui, title, "");
+                } else {
+                    ca_ui_printf(c->cfg.ui, "\n[调用工具 %s]\n", s->name);
+                }
+            }
             c->tout.len = 0;
             ca_tool_status ts = run_tool(c, s->name, s->args);
 
             /* 结果**也要显示给用户**。只回灌给模型的话，
              * 用户就是在一个黑盒里看着代理改他的文件。
              * 「代理做了什么」必须是可见的，不只是事后可查。 */
-            if (c->tout.len > 0) ca_ui_line(c->cfg.ui, c->tool_out);
+            if (c->tout.len > 0) {
+                if (c->cfg.ui->is_tty) {
+                    ca_ui_note(c->cfg.ui, c->tool_out);
+                } else {
+                    ca_ui_line(c->cfg.ui, c->tool_out);
+                }
+            }
 
             if (ts == CA_TOOL_DENIED) {
                 denied = 1;
                 /* 明确告知。用户按下 n 之后必须有反馈，
                  * 否则他无法确认自己到底批准了没有。 */
-                ca_ui_line(c->cfg.ui, "已拒绝该工具调用，未做任何改动。");
+                ca_ui_warn(c->cfg.ui, "已拒绝该工具调用，未做任何改动。");
             } else if (ts != CA_TOOL_OK) {
-                ca_ui_line(c->cfg.ui, "（该工具未成功，结果见上）");
+                ca_ui_warn(c->cfg.ui, "（该工具未成功，结果见上）");
             }
             if (c->tout.len > 0) results_append(c, c->tool_out);
             /* 附一句说明工具的状态：真实模型收到裸结果会原样再要一次

@@ -140,6 +140,61 @@ CA_TEST(ui_plain_never_emits_ansi) {
 
 /* ==================================================== 权限确认（P1 / P5） */
 
+CA_TEST(ui_tty_panel_and_kv_emit_visual_decoration) {
+    /* TTY 下要有**可视结构**：标题、键值、颜色。
+     * 用户在终端里要能一眼看出「这是代理的输出、这是工具的动作、这是错误」。 */
+    ca_ui ui;
+    make_plain_ui(&ui);
+    ui.is_tty = 1;
+    reset_io();
+
+    ca_ui_heading(&ui, "标题行");
+    ca_ui_kv(&ui, "工作区", "C:/tmp");
+    ca_ui_panel(&ui, "调用工具 write_file", "文件：a.txt\n内容：hi");
+    ca_ui_error(&ui, "错误：连接失败");
+
+    CA_ASSERT(strstr(g_buf, "\x1b[") != NULL);   /* 有 ANSI 转义 */
+    CA_ASSERT(strstr(g_buf, "标题行") != NULL);
+    CA_ASSERT(strstr(g_buf, "工作区") != NULL);
+    CA_ASSERT(strstr(g_buf, "调用工具 write_file") != NULL);
+    CA_ASSERT(strstr(g_buf, "a.txt") != NULL);
+    CA_ASSERT(strstr(g_buf, "\x1b[31m") != NULL); /* 错误是红色 */
+}
+
+CA_TEST(ui_plain_mode_never_emits_decoration) {
+    /* 非 TTY（CI、管道）必须**只有纯文本**：
+     * 任何转义序列都会变成消费者眼中的噪音。 */
+    ca_ui ui;
+    make_plain_ui(&ui);
+    reset_io();
+
+    ca_ui_heading(&ui, "标题行");
+    ca_ui_kv(&ui, "工作区", "C:/tmp");
+    ca_ui_panel(&ui, "调用工具 write_file", "文件：a.txt");
+    ca_ui_ok(&ui, "完成");
+    ca_ui_warn(&ui, "注意");
+    ca_ui_error(&ui, "错误：连接失败");
+    ca_ui_note(&ui, "备注");
+
+    CA_ASSERT(strstr(g_buf, "\x1b[") == NULL);
+    CA_ASSERT(strstr(g_buf, "标题行") != NULL);
+    CA_ASSERT(strstr(g_buf, "工作区: C:/tmp") != NULL);
+    CA_ASSERT(strstr(g_buf, "错误：连接失败") != NULL);
+}
+
+CA_TEST(ui_panel_keeps_every_body_line) {
+    /* 面板不能吞行：批准前看到的内容必须完整（P2/P5）。 */
+    ca_ui ui;
+    make_plain_ui(&ui);
+    ui.is_tty = 1;
+    reset_io();
+
+    ca_ui_panel(&ui, "T", "第一行\n第二行\n第三行");
+    CA_ASSERT(strstr(g_buf, "第一行") != NULL);
+    CA_ASSERT(strstr(g_buf, "第二行") != NULL);
+    CA_ASSERT(strstr(g_buf, "第三行") != NULL);
+}
+
 CA_TEST(ui_confirm_allow_on_y) {
     ca_ui ui;
     reset_io();
@@ -345,6 +400,9 @@ int main(void) {
         {"ui_plain_stream_end_closes_line", ca_test_run_ui_plain_stream_end_closes_line},
         {"ui_plain_never_emits_ansi", ca_test_run_ui_plain_never_emits_ansi},
         /* 权限确认 */
+        {"ui_tty_panel_and_kv_emit_visual_decoration", ca_test_run_ui_tty_panel_and_kv_emit_visual_decoration},
+        {"ui_plain_mode_never_emits_decoration", ca_test_run_ui_plain_mode_never_emits_decoration},
+        {"ui_panel_keeps_every_body_line", ca_test_run_ui_panel_keeps_every_body_line},
         {"ui_confirm_allow_on_y", ca_test_run_ui_confirm_allow_on_y},
         {"ui_confirm_allow_on_single_y", ca_test_run_ui_confirm_allow_on_single_y},
         {"ui_confirm_denies_on_anything_else", ca_test_run_ui_confirm_denies_on_anything_else},

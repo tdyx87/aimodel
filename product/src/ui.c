@@ -84,6 +84,128 @@ void ca_ui_printf(ca_ui *ui, const char *fmt, ...) {
     }
 }
 
+/* ---- 视觉增强（仅 TTY）----
+ *
+ * 目标不是「好看」，而是**让状态一眼可见**：哪一步在跑、哪一步失败了、
+ * 哪些是模型的话、哪些是工具的动作。非 TTY 下全部退化成普通文本，
+ * CI 消费者看到的仍是干净的一行行文本。
+ *
+ * 颜色用 ANSI SGR；Windows 10+ 的控制台需要 ENABLE_VIRTUAL_TERMINAL_PROCESSING，
+ * 由 ca_term_setup_console() 打开。 */
+#define CA_SGR_RESET "\x1b[0m"
+#define CA_SGR_DIM "\x1b[2m"
+#define CA_SGR_BOLD "\x1b[1m"
+#define CA_SGR_RED "\x1b[31m"
+#define CA_SGR_GREEN "\x1b[32m"
+#define CA_SGR_YELLOW "\x1b[33m"
+#define CA_SGR_BLUE "\x1b[36m"
+
+static void ui_colored(ca_ui *ui, const char *color, const char *text) {
+    if (ui == NULL) return;
+    if (!ui->is_tty) {
+        /* 非 TTY：只输出内容本身，不带任何转义序列。 */
+        ca_ui_line(ui, text);
+        return;
+    }
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf), "%s%s%s", color, text, CA_SGR_RESET);
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        ui_putn(ui, buf, (size_t)n);
+        if (!ui->last_was_newline) ui_puts(ui, "\n");
+    } else {
+        ca_ui_line(ui, text);
+    }
+}
+
+void ca_ui_heading(ca_ui *ui, const char *title) {
+    if (ui == NULL || title == NULL) return;
+    if (!ui->is_tty) {
+        ca_ui_line(ui, title);
+        return;
+    }
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf), "%s%s%s\n", CA_SGR_BOLD CA_SGR_BLUE, title,
+                     CA_SGR_RESET);
+    if (n > 0 && (size_t)n < sizeof(buf)) ui_putn(ui, buf, (size_t)n);
+}
+
+void ca_ui_panel(ca_ui *ui, const char *title, const char *body) {
+    if (ui == NULL) return;
+    if (!ui->is_tty) {
+        if (title != NULL && title[0] != '\0') ca_ui_line(ui, title);
+        if (body != NULL && body[0] != '\0') ca_ui_line(ui, body);
+        return;
+    }
+    /* 盒面板：标题在上，内容缩进两格，下边框线。
+     * 不清屏、不折叠——契约 P2 要求批准前看到完整内容。 */
+    /* 盒子字符不能直接写在格式串里：MSVC 把多字节字符当成格式说明符，
+     * 报 C4474（参数过多）。一律用 %s 传。 */
+    static const char k_box_top[] = "\xe2\x94\x8c\xe2\x94\x80 ";  /* ┌─ */
+    static const char k_box_bar[] = "\xe2\x94\x82";                 /* │ */
+    static const char k_box_bottom[] =
+        "\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+        "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+        "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+        "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+        "\xe2\x94\x80\xe2\x94\x80";  /* └──────────────────── */
+    char line[1024];
+    int n = snprintf(line, sizeof(line), "%s%s%s %s%s\n", CA_SGR_DIM, k_box_top,
+                     title != NULL ? title : "", k_box_top + 3, CA_SGR_RESET);
+    if (n > 0 && (size_t)n < sizeof(line)) ui_putn(ui, line, (size_t)n);
+
+    if (body != NULL && body[0] != '\0') {
+        const char *p = body;
+        while (*p != '\0') {
+            const char *nl = strchr(p, '\n');
+            size_t len = (nl != NULL) ? (size_t)(nl - p) : strlen(p);
+            if (len > 0) {
+                char row[1024];
+                int m = snprintf(row, sizeof(row), "%s%s%s ", CA_SGR_DIM, k_box_bar,
+                                 CA_SGR_RESET);
+                size_t head = (m > 0 && (size_t)m < sizeof(row)) ? (size_t)m : 0;
+                if (head + len + 2 < sizeof(row)) {
+                    memcpy(row + head, p, len);
+                    size_t rest = sizeof(row) - head - len - 1;
+                    if (rest > sizeof(CA_SGR_RESET)) {
+                        memcpy(row + head + len, CA_SGR_RESET, sizeof(CA_SGR_RESET));
+                        ui_putn(ui, row, head + len + sizeof(CA_SGR_RESET) - 1);
+                    } else {
+                        ui_putn(ui, p, len);
+                    }
+                } else {
+                    ui_putn(ui, p, len);
+                }
+                ui_puts(ui, "\n");
+            }
+            if (nl == NULL) break;
+            p = nl + 1;
+        }
+    }
+    n = snprintf(line, sizeof(line), "%s%s%s\n", CA_SGR_DIM, k_box_bottom,
+                 CA_SGR_RESET);
+    if (n > 0 && (size_t)n < sizeof(line)) ui_putn(ui, line, (size_t)n);
+}
+
+void ca_ui_kv(ca_ui *ui, const char *key, const char *value) {
+    if (ui == NULL) return;
+    if (!ui->is_tty) {
+        ca_ui_printf(ui, "%s: %s\n", key != NULL ? key : "", value != NULL ? value : "");
+        return;
+    }
+    char buf[1024];
+    int n = snprintf(buf, sizeof(buf), "%s%s%s  %s", CA_SGR_DIM,
+                     key != NULL ? key : "", CA_SGR_RESET, value != NULL ? value : "");
+    if (n > 0 && (size_t)n < sizeof(buf)) {
+        ui_putn(ui, buf, (size_t)n);
+        if (!ui->last_was_newline) ui_puts(ui, "\n");
+    }
+}
+
+void ca_ui_ok(ca_ui *ui, const char *text) { ui_colored(ui, CA_SGR_GREEN, text); }
+void ca_ui_warn(ca_ui *ui, const char *text) { ui_colored(ui, CA_SGR_YELLOW, text); }
+void ca_ui_error(ca_ui *ui, const char *text) { ui_colored(ui, CA_SGR_RED, text); }
+void ca_ui_note(ca_ui *ui, const char *text) { ui_colored(ui, CA_SGR_DIM, text); }
+
 /* ---- 等待响应 ---- */
 
 void ca_ui_wait_begin(ca_ui *ui) {
