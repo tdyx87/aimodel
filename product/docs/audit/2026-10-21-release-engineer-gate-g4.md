@@ -75,3 +75,30 @@ G4 放行后，用 `scripts/mem_load.py` 做 C3 实测时暴露了两个**「文
 长会话不再中途失效、会话恢复不再丢历史、内存有 500 轮采样。
 稳定门槛仍差 C1 的 macOS 部分与 C2，不因本次修复而上调版本号。
 
+## 8. 追加记录（2026-10-21 深夜）：C1 全部达成
+
+把「文档入口冒烟」从仅 Linux 扩到 Linux + macOS、并把 `mem_load.py` 纳入 CI 之后，
+CI run `0dc6e35` **三平台全绿**（ubuntu / macos / windows）。
+
+这一扩**立刻抓到两个只在特定平台/路径下出现的真缺陷**（修复见
+`git log 0dc6e35`）：
+
+1. `scripts/build.sh` 第 16 行 `$BUILD_DIR` 后紧跟全角逗号：Linux runner 是 UTF-8 locale，
+   标点不会被算进变量名；macOS runner 的 C locale 下 bash 把标点字节当成变量名的一部分，
+   报 `BUILD_DIR<乱码>: unbound variable`。改用 `${BUILD_DIR}` 形式。
+2. `scripts/mem_load.py` 用相对路径传给 `Popen`，而 `cwd` 是临时目录 → `FileNotFoundError`；
+   本地一直传绝对路径，所以没暴露。改为先 `resolve()`。
+
+| 项 | 状态 | 依据 |
+|----|------|------|
+| **C1** | **✅ 全部达成**（Linux + macOS 均实跑 `build.sh`，配置/构建/`ctest` 全绿） | run `0dc6e35` |
+| C2 | 仍阻塞（无第三方凭据） | — |
+| C3 | ✅ 已达成（见 §7） | run `0dc6e35` 的「长会话内存实测（500 轮）」步骤 |
+
+**口径不变**：仍为 `0.1.0`（可用，未达稳定门槛）——唯一未达成项是 C2，
+它依赖外部凭据，不是代码问题，但**未验证就不能写成已验证**。
+
+> 经验：新增的 CI 步骤若第一次就是绿的，反而要怀疑它没真正执行。
+> 这两条缺陷都是「步骤刚接上就红」暴露的，和上一轮的 `build.sh` 缺可执行位同一性质。
+
+
