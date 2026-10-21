@@ -157,6 +157,8 @@ echo "总结这个目录" | ./cagent
 - 非 OpenAI 兼容格式的服务（US-8 未做）
 - 无 ASAN/UBSAN 构建；越界靠不变量断言覆盖
 - `search` 仅字面匹配，**不支持正则**
+- 工具结果以**尾随 user 消息**回灌（未采用 `role:"tool"` + `tool_call_id` 标准握手），
+  因此模型偶尔会重复请求同一个工具；已附「工具已执行」提示缓解，但未根治
 
 ## 5. 测试
 
@@ -167,6 +169,22 @@ python scripts/curl_smoke.py   build/Release/cagent.exe # 真实 HTTP 传输
 python scripts/session_smoke.py build/Release/cagent.exe # /new /list /resume /delete
 python scripts/tool_smoke.py   build/Release/cagent.exe # 批准通道（y 真的写、n 不写）
 ```
+
+### 5.1 真实服务自检（需要凭据，可选）
+
+仓库里的冒烟都跑在**本地假服务**上——它们能证明协议解析与批准通道正确，
+但证明不了真实服务会给我们想要的东西。真实故障正是这么暴露的
+（请求体里没有 `tools` 字段，真实模型只会聊天，而伪造 `tool_calls` 的测试全绿）。
+
+```bash
+export CAGENT_API_BASE=https://api.example.com/v1
+export CAGENT_MODEL=your-model
+export CAGENT_API_KEY=sk-...
+python scripts/real_api_smoke.py --exe build/Release/cagent.exe
+```
+
+验三件事：真实 TLS + 流式对话、多轮记忆、一次**工具调用走完批准并真的落盘**。
+凭据只从环境变量读，脚本不打印、不落盘；服务端限流（429）会自动重试。
 
 ## 6. 目录
 
