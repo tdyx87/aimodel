@@ -259,6 +259,48 @@ CA_TEST(ui_tty_stream_redraws_in_place) {
     CA_ASSERT(strcmp(g_buf + after_begin, "Hi\n") == 0);
 }
 
+CA_TEST(ui_wait_hint_is_tty_only) {
+    /* 管道/重定向下不能多出任何字符——脚本要能直接消费输出。 */
+    ca_ui ui;
+    reset_io();
+    make_plain_ui(&ui);
+    ca_ui_wait_begin(&ui);
+    ca_ui_wait_end(&ui);
+    CA_ASSERT_EQ_INT(g_len, 0);
+}
+
+CA_TEST(ui_wait_hint_is_erased_by_first_output) {
+    /* TTY 下先给一行「等待响应」，真实输出到来时必须**先擦掉**它，
+     * 否则会看到「（等待响应…）[调用工具 x]」粘在一行。 */
+    ca_ui ui;
+    reset_io();
+    make_plain_ui(&ui);
+    ui.is_tty = 1;
+    ca_ui_wait_begin(&ui);
+    CA_ASSERT(strstr(g_buf, "等待响应") != NULL);
+    CA_ASSERT_EQ_INT(ui.waiting, 1);
+    ca_ui_line(&ui, "hello");
+    CA_ASSERT_EQ_INT(ui.waiting, 0);
+    /* 擦行序列只出现一次，且出现在 hello 之前 */
+    const char *erase = strstr(g_buf, "\x1b[2K");
+    CA_ASSERT(erase != NULL);
+    CA_ASSERT(erase < strstr(g_buf, "hello"));
+    ca_ui_wait_end(&ui); /* 已经擦过，不再重复 */
+    CA_ASSERT_EQ_INT((long long)strlen(strstr(g_buf, "hello")), 6);
+}
+
+CA_TEST(ui_wait_hint_cleared_when_no_text_arrives) {
+    /* 本轮只调了工具、没有文本：等待行必须在收尾时被擦掉。 */
+    ca_ui ui;
+    reset_io();
+    make_plain_ui(&ui);
+    ui.is_tty = 1;
+    ca_ui_wait_begin(&ui);
+    ca_ui_wait_end(&ui);
+    CA_ASSERT_EQ_INT(ui.waiting, 0);
+    CA_ASSERT(strstr(g_buf, "\x1b[2K") != NULL);
+}
+
 CA_TEST(ui_shutdown_is_safe_without_raw_mode) {
     /* 没进过原始模式时 shutdown 必须是安全的空操作——
      * 否则非 TTY 路径会在退出时做无意义的系统调用。 */
@@ -313,6 +355,9 @@ int main(void) {
         {"ui_confirm_null_is_deny", ca_test_run_ui_confirm_null_is_deny},
         /* TTY 路径 */
         {"ui_tty_stream_redraws_in_place", ca_test_run_ui_tty_stream_redraws_in_place},
+    {"ui_wait_hint_is_tty_only", ca_test_run_ui_wait_hint_is_tty_only},
+    {"ui_wait_hint_is_erased_by_first_output", ca_test_run_ui_wait_hint_is_erased_by_first_output},
+    {"ui_wait_hint_cleared_when_no_text_arrives", ca_test_run_ui_wait_hint_cleared_when_no_text_arrives},
         {"ui_shutdown_is_safe_without_raw_mode", ca_test_run_ui_shutdown_is_safe_without_raw_mode},
         /* 终端能力层 */
         {"term_raw_is_safe_on_non_tty", ca_test_run_term_raw_is_safe_on_non_tty},

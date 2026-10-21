@@ -253,7 +253,11 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
     hreq.body_len = strlen(body);
     hreq.headers = (const char *const *)hdr;
 
+    /* 光标先在「等待响应」上，收到第一段输出时自动让位（仅 TTY）。
+     * 管道/重定向下两者都是空操作，输出照样能被脚本消费。 */
+    ca_ui_wait_begin(c->cfg.ui);
     ca_http_status hs = c->cfg.transport->run(&hreq, on_data, &t);
+    ca_ui_wait_end(c->cfg.ui);
 
     /* 保存本轮的工具槽位，供执行阶段读取。
      * 注意**必须计数**——早先拷了槽位却忘了 slot_count，

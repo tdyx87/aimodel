@@ -59,6 +59,7 @@ typedef struct {
     int raw_enabled;   /* 原始模式是否已启用，退出时需还原 */
 
     int spinner;       /* 是否有进行中的流式输出需要收尾 */
+    int waiting;       /* 是否已打出「等待响应」且尚未被新输出顶掉（仅 TTY） */
     int last_was_newline; /* 上一行是否已闭合，决定要不要补换行 */
     char scratch[512]; /* 组合渲染行时用，避免每次都堆内存 */
 } ca_ui;
@@ -78,6 +79,11 @@ void ca_ui_printf(ca_ui *ui, const char *fmt, ...);
  * begin/token/end 三个动作。TUI 下 token 会覆盖同一行并重绘光标，
  * 行式降级下则是直接追加换行——两条路径各自正确，
  * 上层不需要知道自己跑在哪种终端上。 */
+/* 请求已发出、首个 token 还没到：TTY 下给一行等待提示。
+ * 非 TTY 下什么都不做——管道输出必须干净（契约 §7 降级）。 */
+void ca_ui_wait_begin(ca_ui *ui);
+void ca_ui_wait_end(ca_ui *ui);
+
 void ca_ui_stream_begin(ca_ui *ui);
 void ca_ui_stream_token(ca_ui *ui, const char *text);
 void ca_ui_stream_end(ca_ui *ui);

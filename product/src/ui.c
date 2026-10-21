@@ -9,16 +9,30 @@
 #include <stdio.h>
 #include <string.h>
 
+/* 「等待响应」只是占位行：任何真实输出到来时先把它擦掉，
+ * 否则用户会看到「（等待响应…）[调用工具 x]」粘在一行里。 */
+static void ui_clear_waiting(ca_ui *ui) {
+    if (ui == NULL || !ui->waiting) return;
+    ui->waiting = 0;
+    /* 长度用 sizeof-1："\r\x1b[2K" 是 **5** 个字节（CR + ESC + '[2K'），
+     * 写死 4 会只发出 ESC[2，把后面那行内容的开头吃掉。 */
+    static const char erase[] = "\r\x1b[2K";
+    ui->out.write(ui->out.self, erase, sizeof(erase) - 1);
+    ui->last_was_newline = 0;
+}
+
 static void ui_puts(ca_ui *ui, const char *s) {
     if (ui == NULL || s == NULL) return;
     size_t n = strlen(s);
     if (n == 0) return;
+    ui_clear_waiting(ui);
     ui->out.write(ui->out.self, s, n);
     ui->last_was_newline = (s[n - 1] == '\n');
 }
 
 static void ui_putn(ca_ui *ui, const char *s, size_t n) {
     if (ui == NULL || s == NULL || n == 0) return;
+    ui_clear_waiting(ui);
     ui->out.write(ui->out.self, s, n);
     ui->last_was_newline = (s[n - 1] == '\n');
 }
@@ -68,6 +82,23 @@ void ca_ui_printf(ca_ui *ui, const char *fmt, ...) {
          * 代理说完了，而它没有。 */
         ui_puts(ui, "\n[输出过长，已省略]\n");
     }
+}
+
+/* ---- 等待响应 ---- */
+
+void ca_ui_wait_begin(ca_ui *ui) {
+    if (ui == NULL || !ui->is_tty) return;
+    static const char hint[] = "（等待响应…）";
+    ui->waiting = 1;
+    ui->out.write(ui->out.self, hint, sizeof(hint) - 1);
+    ui->last_was_newline = 0;
+}
+
+void ca_ui_wait_end(ca_ui *ui) {
+    if (ui == NULL || !ui->waiting) return;
+    /* 到这一轮结束还没被真实输出顶掉，说明本轮没有可见文本
+     * （例如只调了工具）。把占位行擦掉，让后续内容从行首开始。 */
+    ui_clear_waiting(ui);
 }
 
 /* ---- 流式输出 ---- */
