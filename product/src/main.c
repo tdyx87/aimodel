@@ -579,6 +579,35 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* 转储模型的输入与输出。**默认开**。
+     *
+     * 为什么默认开：代理对用户是个黑盒。「它到底跟模型说了什么」
+     * 「模型到底回了什么」是排查问题的第一手证据，而平时根本看不到。
+     * 打印的是原文，看到的就是真正发出去的。
+     *
+     * 关掉：CAGENT_TRACE=0（"0"/"off"/"false"/"no" 都算关）。
+     * 为什么保留这个开关：终端输出会变得很长，
+     * 有人只想看结果、不想看协议细节。 */
+    int trace = 1;
+    const char *trace_env = getenv("CAGENT_TRACE");
+    if (trace_env != NULL && trace_env[0] != '\0') {
+        if (strcmp(trace_env, "0") == 0 || strcmp(trace_env, "off") == 0 ||
+            strcmp(trace_env, "false") == 0 || strcmp(trace_env, "no") == 0) {
+            trace = 0;
+        }
+    }
+    /* 原始协议帧：默认**关**。模型回一句话往往就是上百帧
+     * （每 token 一帧），逐帧打印会把终端刷爆，正文反而看不见。
+     * 真要抠协议细节时再打开。 */
+    int trace_raw = 0;
+    const char *trace_raw_env = getenv("CAGENT_TRACE_RAW");
+    if (trace_raw_env != NULL && trace_raw_env[0] != '\0') {
+        if (strcmp(trace_raw_env, "0") != 0 && strcmp(trace_raw_env, "off") != 0 &&
+            strcmp(trace_raw_env, "false") != 0 && strcmp(trace_raw_env, "no") != 0) {
+            trace_raw = 1;
+        }
+    }
+
     if (base == NULL || base[0] == '\0' || model == NULL || model[0] == '\0') {
         print_usage(stderr);
         return 2;
@@ -692,6 +721,9 @@ int main(int argc, char **argv) {
     /* 单次请求上限：0 表示用默认（256 KB）。core 会把它钳制到
      * [16 KB, 4 MB]，钳制后的真实值从 ca_core_context_bytes() 取。 */
     cfg.context_bytes = context_bytes;
+    /* 转储模型的输入与输出（默认开；CAGENT_TRACE=0 可关）。 */
+    cfg.trace = trace;
+    cfg.trace_raw = trace_raw;
     if (g_web != NULL) {
         cfg.on_event = web_on_core_event;
         cfg.on_event_user = g_web;

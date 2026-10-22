@@ -84,6 +84,44 @@ void ca_ui_printf(ca_ui *ui, const char *fmt, ...) {
     }
 }
 
+/* 原样转储一段文本（调试用）。
+ *
+ * 为什么单独一个函数而不是让调用方自己 printf：
+ *   1. **分层**：core 不碰终端细节（契约 §8），转义与补行都在 ui 层；
+ *   2. **原样**：这是「用户要看到发给模型的原文」用的，
+ *      所以**不做任何美化**——不折行、不加缩进、不替换字符。
+ *      一旦在这里偷偷加工，看到的就不是真正发出去的东西了；
+ *   3. **不截断**：正文可能很长（请求体可达数 MB），
+ *      截断会让「转储」失去意义（要复制粘贴给别处看时尤其致命）。
+ *
+ * 标题单独一行，正文原样跟在后面。 */
+void ca_ui_dump(ca_ui *ui, const char *title, const char *text) {
+    if (ui == NULL) return;
+    /* 先把当前行闭合。
+     *
+     * 为什么需要：dump 常常发生在**模型的话正在流式输出**的当口，
+     * 此时当前行还没换行。直接写标题会粘在模型那句话后面，
+     * 变成「…模型说的话<- 请求 …」——两个不相干的东西连成一句，
+     * 谁都读不出来。 */
+    if (!ui->last_was_newline) ui_puts(ui, "\n");
+    if (title != NULL && title[0] != '\0') ca_ui_line(ui, title);
+    if (text == NULL) return;
+    /* 逐行原样输出。末尾没有换行时补一个，
+     * 否则下一段输出会粘在同一行上。 */
+    const char *p = text;
+    while (*p != '\0') {
+        const char *nl = strchr(p, '\n');
+        if (nl == NULL) {
+            ui_puts(ui, p);
+            if (!ui->last_was_newline) ui_puts(ui, "\n");
+            break;
+        }
+        ui_putn(ui, p, (size_t)(nl - p));
+        ui_puts(ui, "\n");
+        p = nl + 1;
+    }
+}
+
 /* ---- 视觉增强（仅 TTY）----
  *
  * 目标不是「好看」，而是**让状态一眼可见**：哪一步在跑、哪一步失败了、

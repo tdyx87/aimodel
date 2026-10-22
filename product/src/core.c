@@ -181,6 +181,18 @@ static void on_event(const ca_event *ev, void *user) {
                 c->saw_text = 1;
             }
             ca_ui_stream_token(c->cfg.ui, piece);
+            /* 同时攒一份**完整文本**：流式输出是「正在打字」的效果，
+             * 屏幕上没法整段复制。用户要的是一份可复制的完整输出。 */
+            if (c->cfg.trace) {
+                size_t n = strlen(piece);
+                if (c->answer_len + n + 1 <= sizeof(c->answer)) {
+                    memcpy(c->answer + c->answer_len, piece, n + 1);
+                    c->answer_len += n;
+                } else if (!c->answer_truncated) {
+                    /* 显式标注，不静默截断（与工具结果的约定一致）。 */
+                    c->answer_truncated = 1;
+                }
+            }
             /* 富客户端（Web UI）需要知道「这是模型说的」，
              * 而不是从终端文本里猜。 */
             if (c->cfg.on_event != NULL) {
@@ -219,6 +231,21 @@ static void on_event(const ca_event *ev, void *user) {
 static void on_frame(const ca_sse_frame *f, void *user) {
     turn_ctx *t = (turn_ctx *)user;
     if (f == NULL || f->data == NULL) return;
+    /* 原样转储服务端返回的每一帧。
+     *
+     * 为什么打印**原始帧**而不是「解析后的文本」：
+     * 模型说的话已经被流式打印到界面上了（ca_ui_stream_token），
+     * 再打印一遍是噪音。真正看不到的是**协议层**的东西——
+     * tool_calls 的 id、arguments 的分片、服务端的错误体。
+     * 那些只有原始帧里有。 */
+    if (t->core->cfg.trace_raw) {
+        char title[96];
+        /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，
+         * 而零告警是 CI 硬门禁。中文一律作为参数传。 */
+        snprintf(title, sizeof(title), "%s %s [%lu %s]", "<-", "服务端帧",
+                 (unsigned long)strlen(f->data), "字节");
+        ca_ui_dump(t->core->cfg.ui, title, f->data);
+    }
     int rc = ca_llm_on_frame(t->llm, f->data, strlen(f->data), on_event, t);
     /* 非 0：协议无法解析或触到硬上限。带着半截数据继续执行工具是危险的，
      * 标记后由外层决定中止。 */
@@ -496,6 +523,28 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
 
     const char *body = c->body;
 
+    /* 转储**真正发出去的**请求体。
+     *
+     * 为什么在这一刻、而不是构造完就打印：请求体可能被历史淘汰机制
+     * 改写（丢掉最旧的完整轮次后重试），只有**最终**这一份才是
+     * 服务端真正收到的。打印早于它的版本就是在骗人。
+     *
+     * 请求体里**没有** API key（key 在 Authorization 头里），
+     * 所以原样打印不会泄露密钥。 */
+    if (c->cfg.trace) {
+        char title[192];
+        /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，
+         * 而零告警是 CI 硬门禁。中文一律作为参数传。 */
+        snprintf(title, sizeof(title), "%s %s %s %lu %s", "->", "请求", c->url,
+                 (unsigned long)strlen(body), "字节");
+        ca_ui_dump(c->cfg.ui, title, body);
+    }
+
+    /* 本轮的模型输出从零开始攒。 */
+    c->answer_len = 0;
+    c->answer[0] = '\0';
+    c->answer_truncated = 0;
+
     /* 鉴权头由 init 拼好，可能为空。
      * 空时把这一项写成 NULL —— 传输层按「遇到 NULL 即结束」遍历，
      * 所以它必须排在最后。
@@ -585,6 +634,27 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
         }
         return (hs == CA_HTTP_ERR_PROTOCOL) ? CA_CORE_ERR_PROTOCOL
                                              : CA_CORE_ERR_TRANSPORT;
+    }
+
+    /* 本轮模型输出的**完整文本**。
+     *
+     * 为什么在这里而不是流式打印时：流式是「正在打字」的效果，
+     * 屏幕上留不下可复制的完整文本。用户要的是「把输出全部打印出来」——
+     * 一份完整、能整段拷走的副本。
+     *
+     * 纯工具调用的一轮没有文本，这时**不打印**（避免刷一串空标题）。 */
+    if (c->cfg.trace && c->answer_len > 0) {
+        char title[160];
+        /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，
+         * 而零告警是 CI 硬门禁。中文一律作为参数传。 */
+        snprintf(title, sizeof(title), "%s %s [%lu %s]", "<-", "模型输出",
+                 (unsigned long)c->answer_len, "字节");
+        ca_ui_dump(c->cfg.ui, title, c->answer);
+        if (c->answer_truncated) {
+            /* 超出上限必须**说出来**：一份被悄悄截断的「完整输出」
+             * 比没有更糟——用户会以为看到了全部。 */
+            ca_ui_line(c->cfg.ui, "（上面的模型输出超过展示上限，已截断）");
+        }
     }
     return CA_CORE_OK;
 }

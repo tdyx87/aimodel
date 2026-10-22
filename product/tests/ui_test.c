@@ -195,6 +195,48 @@ CA_TEST(ui_panel_keeps_every_body_line) {
     CA_ASSERT(strstr(g_buf, "第三行") != NULL);
 }
 
+CA_TEST(ui_dump_keeps_text_verbatim) {
+    /* ca_ui_dump 是「把发给模型的原文原样打出来」用的。
+     * **原样**是硬要求：一旦在这里偷偷加工（加缩进、折行、替换字符），
+     * 用户看到的就是被加工过的东西，而不是真正发出去的东西。 */
+    ca_ui ui;
+    make_plain_ui(&ui);
+    reset_io();
+
+    ca_ui_dump(&ui, "标题", "{\"a\":1}\n第二行\t带制表符");
+    CA_ASSERT(strstr(g_buf, "{\"a\":1}") != NULL);
+    CA_ASSERT(strstr(g_buf, "第二行") != NULL);
+    CA_ASSERT(strstr(g_buf, "\t") != NULL);   /* 制表符没被替换成空格 */
+    CA_ASSERT(strstr(g_buf, "标题") != NULL);
+    /* 逐行原样，不能把两行粘成一行 */
+    CA_ASSERT(strstr(g_buf, "{\"a\":1}\n第二行") != NULL);
+}
+
+CA_TEST(ui_dump_closes_the_open_line_first) {
+    /* dump 常常发生在**模型的话正在流式输出**的当口：当前行还没换行。
+     * 直接写标题会粘在模型那句话后面，变成
+     * 「…模型说的话标题」——两个不相干的东西连成一句，谁都读不出来。 */
+    ca_ui ui;
+    make_plain_ui(&ui);
+    reset_io();
+
+    ca_ui_stream_begin(&ui);
+    ca_ui_stream_token(&ui, "模型正在说的话");
+    ca_ui_dump(&ui, "T", "正文");
+    /* 标题前面必须先断行 */
+    CA_ASSERT(strstr(g_buf, "模型正在说的话\nT") != NULL);
+}
+
+CA_TEST(ui_dump_appends_newline_when_body_lacks_one) {
+    /* 正文末尾没有换行时要补一个，否则下一段输出会粘上来。 */
+    ca_ui ui;
+    make_plain_ui(&ui);
+    reset_io();
+
+    ca_ui_dump(&ui, "T", "没有换行的正文");
+    CA_ASSERT(strstr(g_buf, "没有换行的正文\n") != NULL);
+}
+
 CA_TEST(ui_confirm_allow_on_y) {
     ca_ui ui;
     reset_io();
@@ -403,6 +445,9 @@ int main(void) {
         {"ui_tty_panel_and_kv_emit_visual_decoration", ca_test_run_ui_tty_panel_and_kv_emit_visual_decoration},
         {"ui_plain_mode_never_emits_decoration", ca_test_run_ui_plain_mode_never_emits_decoration},
         {"ui_panel_keeps_every_body_line", ca_test_run_ui_panel_keeps_every_body_line},
+        {"ui_dump_keeps_text_verbatim", ca_test_run_ui_dump_keeps_text_verbatim},
+        {"ui_dump_closes_the_open_line_first", ca_test_run_ui_dump_closes_the_open_line_first},
+        {"ui_dump_appends_newline_when_body_lacks_one", ca_test_run_ui_dump_appends_newline_when_body_lacks_one},
         {"ui_confirm_allow_on_y", ca_test_run_ui_confirm_allow_on_y},
         {"ui_confirm_allow_on_single_y", ca_test_run_ui_confirm_allow_on_single_y},
         {"ui_confirm_denies_on_anything_else", ca_test_run_ui_confirm_denies_on_anything_else},

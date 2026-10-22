@@ -74,6 +74,14 @@ void ca_ui_shutdown(ca_ui *ui);
 void ca_ui_line(ca_ui *ui, const char *s);   /* 一行，自动补 \n */
 void ca_ui_printf(ca_ui *ui, const char *fmt, ...);
 
+/* 原样转储一段文本（调试用）。
+ *
+ * 正文**原样输出**：不折行、不缩进、不替换字符、**不截断**。
+ * 用途是「让用户看到真正发给模型的原文」——
+ * 一旦在这里偷偷加工，看到的就不是真正发出去的东西了。
+ * 标题单独一行；正文末尾没有换行时自动补一个。 */
+void ca_ui_dump(ca_ui *ui, const char *title, const char *text);
+
 /* ---- 视觉增强（仅 TTY 生效）----
  *
  * 非 TTY 路径必须保持纯文本：CI 消费者会逐行比对，装饰性输出会变成噪音。
@@ -110,18 +118,6 @@ void ca_ui_stream_end(ca_ui *ui);
  *
  * 注意 text 是**原文**，本函数不做任何截断或省略。 */
 ca_ui_decision ca_ui_confirm(ca_ui *ui, const char *tool, const char *text);
-
-/* 只展示、不提问。
- *
- * 为什么要拆开：有些调用在提问之前就该知道「问了也是白问」。
- * 典型是 run_shell 的策略开关没开——此时向用户要一个 y/N，
- * 等于浪费一次按键，还让人以为「我明明批准了怎么还是没执行」。
- * 于是流程变成：先展示内容 → 查策略 → 策略允许才提问。 */
-void ca_ui_show_pending(ca_ui *ui, const char *tool, const char *text);
-
-/* 只提问、不展示（内容已由 ca_ui_show_pending 展示过）。
- * 读一个字符：y/Y 放行，其余（含回车、EOF、错误）一律拒绝。 */
-ca_ui_decision ca_ui_ask(ca_ui *ui, const char *tool);
 
 /* 只展示、不提问。
  *

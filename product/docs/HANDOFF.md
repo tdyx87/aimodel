@@ -118,10 +118,13 @@
 | 7 | POSIX 构建 | `ca_net_thread_ctx` 不完整类型、`pthread_cond_cond_broadcast` 拼错、`struct timeval` 缺头文件、页面超长字面量（→110 片段）、**`realpath` 隐式声明**（glibc<2.28 指针截断） |
 | 8 | **标准工具握手** | 工具结果从「尾随 user 消息」改为 `role:"tool"` + `tool_call_id`，并回带 assistant 的 `tool_calls`（根治模型重复请求同一工具）；顺手删掉 `llm.h` 里 `ca_llm_build_request_full` 的重复声明；踩到三个**真 bug**：结构体加字段而 `ca_session_export` 没同步 → 未初始化指针被解引用 → 段错误；回带的 `tool_calls` 拼成对象而非数组（服务端 400）；回灌上限与请求体容量脱节 → 结果填满缓冲必然装不下 → 整轮失败 |
 | 9 | **run_shell 退出码竞态** | macOS CI 偶发红，根因是 POSIX 分支里退出状态声明在循环体内 + 一次多余的 waitpid → **命令失败却报 `exit_code="0"`**（失败被说成成功）；**修了两轮**（第一轮不完整：只把「谎报」换成「不报」，症状还换了个样）；最终改为「管道 EOF 之后有界等待子进程真正退出」；两个确定性用例在 Linux 上就能复现两条路径 |
+| 10 | **打印模型输入输出** | 默认打印**完整请求体**（历史淘汰之后的那一份）与**完整模型输出**（可复制的整段文本），原样不加工；`CAGENT_TRACE=0` 关；`CAGENT_TRACE_RAW=1` 另开原始协议帧。请求体里**没有** API key，泄露不了密钥 |
+| 11 | **Web UI 界面重做** | 三个问题都是**结构**问题不是样式问题：`#log` 缺 `min-height:0` → 消息区不滚动、滚动条跑到整页；每个 token 一个气泡 → 一次回答变几十个方块；工具「执行中/完成」各建一张卡 → 同一个工具出现两次。另有配色/圆角/长输出折叠/空态/响应式重做。契约新增 §15.1「界面结构不变量 V1–V6」，`web_smoke.py` 加 5 条静态检查钉住 |
 
-**验证基线（当前）**：`ctest` 8/8；`core_test` 239 检查 / `session_test` 1735 / `llm_test` 77 /
-`tools_test` 132 / `ui_test` 63 / `json_test` 74 / `sse_test` 84 / `http_test` 25 / `mem_test` 37 —— 全 0 失败；
-`mem_load --turns 500` 峰值 8.0x MB；`posix_check.sh` ALL CLEAN；两个 Web 冒烟 PASS。
+**验证基线（当前）**：`ctest` 8/8；`core_test` 252 检查 / `session_test` 1735 / `llm_test` 77 /
+`tools_test` 132 / `ui_test` 70 / `json_test` 74 / `sse_test` 84 / `http_test` 25 / `mem_test` 37 —— 全 0 失败；
+`mem_load --turns 500` 峰值 8.05 MB；`posix_check.sh` ALL CLEAN；两个 Web 冒烟 PASS；
+Web UI 另在**真实浏览器**里逐条验过（滚动、合并、批准流程、控制台无错）。
 
 ---
 

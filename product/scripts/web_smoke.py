@@ -141,6 +141,31 @@ def main():
         print("  SSE 收到事件: %s" % ok_sse)
         s.close()
 
+        # 5) 页面结构不变量（CI 里没有浏览器，只能查**源码里必须有的东西**）
+        #
+        # 为什么要有这些检查：界面问题（滚动条不对、不自动滚动）
+        # 归根到底都是**结构**问题，而结构是可以静态查的。
+        # 没有它们，改页面时很容易把修好的东西改回去。
+        #
+        #   - `min-height:0`：**最关键的一条**。#log 是 flex 子项，
+        #     而 flex 子项默认 min-height:auto，内容会把容器撑破，
+        #     于是 #log 根本不滚动、滚动条跑到整页上去了。
+        #     少了这一行，「滚动条属于消息区」这件事就不成立。
+        #   - `overflow-y:auto`：#log 必须自己滚动，而不是整页滚。
+        #   - `push(`：追加内容后跟到底部的入口。
+        #   - 不该再有 `position:sticky`：输入条现在是 flex 的一行，
+        #     不再靠 sticky 粘在整页底部。
+        layout_checks = [
+            ("消息区 min-height:0", "min-height:0" in body),
+            ("消息区自己滚动", "overflow-y:auto" in body),
+            ("有底部跟随逻辑", "function push(" in body),
+            ("输入条不再靠 sticky", "position:sticky" not in body),
+            ("同一段回复合并成一个气泡", "if(!cur){" in body),
+        ]
+        for label, ok in layout_checks:
+            print("  %-30s %s" % (label, "OK" if ok else "FAIL"))
+            ok_page = ok_page and ok
+
         results = [ok_page, ok_auth, ok_tok, ok_send, ok_sse]
         print("RESULT: %s" % ("PASS" if all(results) else "FAIL"))
         return 0 if all(results) else 1

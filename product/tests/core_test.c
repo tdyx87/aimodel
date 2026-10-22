@@ -491,6 +491,47 @@ CA_TEST(core_shrinks_tool_result_to_fit_a_small_context) {
     g_perm_kind = 0;
 }
 
+CA_TEST(core_trace_dumps_the_request_body) {
+    /* trace 必须把**真正发出去的**请求体原样打印出来。
+     *
+     * 为什么重要：代理对用户是个黑盒。「它到底跟模型说了什么」
+     * 只有请求体能回答——界面上的「调用工具 write_file」不够，
+     * **模型看到的历史**才是关键证据。
+     *
+     * 注意：请求体里**没有** API key（key 在 HTTP 头里），
+     * 所以原样打印不会泄露密钥。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+           "data: [DONE]\n\n");
+    setup(NULL, "");
+    /* 把 trace 打开（默认关，免得干扰其它用例对 UI 输出的断言） */
+    g_core.cfg.trace = 1;
+    CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "问一句"), CA_CORE_OK);
+
+    /* 请求体原文必须在 UI 输出里出现 */
+    CA_ASSERT(strstr(g_ui_buf, "\"model\":\"test-model\"") != NULL);
+    CA_ASSERT(strstr(g_ui_buf, "问一句") != NULL);
+    CA_ASSERT(strstr(g_ui_buf, "\"tools\"") != NULL);
+    /* 标题也要有，用户才知道这段是什么 */
+    CA_ASSERT(strstr(g_ui_buf, "请求") != NULL);
+    /* 模型输出也要完整打印一份（可复制的完整文本） */
+    CA_ASSERT(strstr(g_ui_buf, "模型输出") != NULL);
+    CA_ASSERT(strstr(g_ui_buf, "ok") != NULL);
+}
+
+CA_TEST(core_trace_off_prints_nothing_extra) {
+    /* 关掉 trace 时**不应该**有多余输出——
+     * 否则「默认开」就变成了「没法关」。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+           "data: [DONE]\n\n");
+    setup(NULL, "");
+    CA_ASSERT_EQ_INT(g_core.cfg.trace, 0); /* 默认关（由 main 决定开不开） */
+    CA_ASSERT_EQ_INT(ca_core_run_once(&g_core, "问一句"), CA_CORE_OK);
+    CA_ASSERT(strstr(g_ui_buf, "模型输出") == NULL);
+    CA_ASSERT(strstr(g_ui_buf, "\"model\"") == NULL);
+}
+
 CA_TEST(core_offers_tools_to_the_model) {
     /* 请求体里必须真的带 tools 声明。
      *
@@ -942,6 +983,8 @@ int main(void) {
         {"core_uses_standard_tool_handshake", ca_test_run_core_uses_standard_tool_handshake},
         {"core_handshake_places_each_result_in_its_own_tool_message", ca_test_run_core_handshake_places_each_result_in_its_own_tool_message},
         {"core_truncates_oversized_tool_result_explicitly", ca_test_run_core_truncates_oversized_tool_result_explicitly},
+        {"core_trace_dumps_the_request_body", ca_test_run_core_trace_dumps_the_request_body},
+        {"core_trace_off_prints_nothing_extra", ca_test_run_core_trace_off_prints_nothing_extra},
         {"core_shrinks_tool_result_to_fit_a_small_context", ca_test_run_core_shrinks_tool_result_to_fit_a_small_context},
         {"core_offers_tools_to_the_model", ca_test_run_core_offers_tools_to_the_model},
         {"core_policy_denial_does_not_ask_the_user", ca_test_run_core_policy_denial_does_not_ask_the_user},
