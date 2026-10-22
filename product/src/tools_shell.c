@@ -105,12 +105,33 @@ typedef struct {
     int found;
     int truncated;
     int files_with_hits;
+    /* 跳过的二进制文件数。二进制里按行找字面串必然匹配不到，
+     * 静默跳过会让模型以为「这里没有这段代码」——用户实测就撞上了：
+     * 在只有 .exe/.lib 的目录里搜 "cmake_minimum_required" 得到 0，
+     * 搜 "." 也得到 0，模型据此以为目录里没有源码。必须说清楚。 */
+    int skipped_binary;
 } search_state;
 
 /* 在单个文件里逐行找字面串。返回 -1 表示读失败（跳过该文件）。 */
 static void search_file(search_state *st, const char *abs, const char *rel) {
     FILE *f = ca_tool_fopen(abs, "rb");
     if (f == NULL) return;
+    {
+        /* 二进制判定：前 4 KB 里出现 NUL 就算二进制。
+         * 文本文件不该含 NUL；二进制按行读会读出乱码行，匹配毫无意义。 */
+        char probe[4096];
+        size_t n = fread(probe, 1, sizeof(probe), f);
+        int binary = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (probe[i] == '\0') { binary = 1; break; }
+        }
+        if (binary) {
+            st->skipped_binary++;
+            fclose(f);
+            return;
+        }
+        rewind(f);
+    }
 char line[8192];
         size_t pat_len = strlen(st->pattern);
         long line_no = 0;
@@ -283,19 +304,29 @@ ca_tool_status ca_tool_search(ca_tool_ctx *ctx, const ca_search_opts *opts) {
     st.found = 0;
     st.truncated = 0;
     st.files_with_hits = 0;
+    st.skipped_binary = 0;
 
     search_dir(&st, root, "", 0);
 
     ca_out_printf(ctx->out,
                   "<result tool=\"search\" query=\"%s\" matches=\"%d\" "
-                  "files=\"%d\" truncated=\"%s\">\n",
+                  "files=\"%d\" truncated=\"%s\" skipped_binary=\"%d\">\n",
                   opts->pattern, st.found, st.files_with_hits,
-                  st.truncated ? "true" : "false");
+                  st.truncated ? "true" : "false", st.skipped_binary);
     if (body_out.len > 0) ca_out_puts(ctx->out, body);
     if (st.truncated) {
         ca_out_puts(ctx->out,
                     "\n<!-- 结果已按上限截断，以上不是全部命中。"
                     "请缩小搜索范围或换一个更具体的关键词。 -->\n");
+    }
+    if (st.skipped_binary > 0) {
+        /* 二进制文件被跳过了，必须说出来：
+         * 否则「0 匹配」会被读成「这里没有这段代码」——
+         * 而真相是「这些文件是二进制，搜不了」。 */
+        ca_out_printf(ctx->out,
+                      "\n<!-- 已跳过 %d 个二进制文件（.exe/.lib/.o 等），"
+                      "它们不参与字面搜索；要找源码请在源码目录里搜。 -->\n",
+                      st.skipped_binary);
     }
     ca_out_puts(ctx->out, "</result>\n");
     free(body);

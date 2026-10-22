@@ -425,6 +425,40 @@ CA_TEST(write_and_read_chinese_filename_roundtrip) {
     ca_ws_free(ws);
 }
 
+CA_TEST(search_reports_skipped_binary_files) {
+    /* 二进制文件被跳过时必须**说出来**。
+     *
+     * 真实用户反馈：在一个只有 .exe/.lib 的目录里 search 得到 0 匹配，
+     * 模型据此以为「这个目录里没有源码」——而真相是「这些文件是二进制，
+     * 本来就搜不了」。静默跳过等于给模型一个错误的结论。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    /* 造一个二进制文件：内容含 NUL */
+    {
+        const char *dir = make_ws_dir();
+        char bin[2048];
+        snprintf(bin, sizeof(bin), "%s%cbin.dat", dir, CA_TEST_SEP);
+        FILE *bf = ca_tool_fopen(bin, "wb");
+        if (bf != NULL) {
+            fputs("abc", bf);
+            fputc(0, bf);
+            fputs("def", bf);
+            fclose(bf);
+        }
+    }
+    ca_tool_ctx ctx = make_ctx(ws, ca_perm_deny_all);
+    ca_search_opts o;
+    memset(&o, 0, sizeof(o));
+    o.pattern = "line 7";
+    ca_tool_status st = ca_tool_search(&ctx, &o);
+    CA_ASSERT_EQ_INT(st, CA_TOOL_OK);
+    CA_ASSERT(strstr(g_result, "skipped_binary=\"1\"") != NULL);
+    /* 说明文字必须是中文提示（用字节序列写，避免源文件编码差异） */
+    CA_ASSERT(strstr(g_result, "\xe4\xba\x8c\xe8\xbf\x9b\xe5\x88\xb6") != NULL);
+    ca_ws_free(ws);
+}
+
 CA_TEST(list_dir_rejects_escape) {
     ca_workspace *ws = make_ws();
     CA_ASSERT(ws != NULL);
@@ -829,6 +863,7 @@ int main(void) {
         {"list_dir_works_and_marks_entries", ca_test_run_list_dir_works_and_marks_entries},
         {"list_dir_prints_chinese_name_as_utf8", ca_test_run_list_dir_prints_chinese_name_as_utf8},
         {"write_and_read_chinese_filename_roundtrip", ca_test_run_write_and_read_chinese_filename_roundtrip},
+        {"search_reports_skipped_binary_files", ca_test_run_search_reports_skipped_binary_files},
         {"list_dir_rejects_escape", ca_test_run_list_dir_rejects_escape},
         {"search_finds_literal_and_reports_counts", ca_test_run_search_finds_literal_and_reports_counts},
         {"search_result_has_no_contradictory_counts", ca_test_run_search_result_has_no_contradictory_counts},
