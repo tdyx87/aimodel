@@ -4,6 +4,9 @@
 
 > 交接文档。新会话先读这一份，再按需读 `product/docs/design/contract.md`。
 > 状态：**功能可用**，CI 三平台绿（`4c1444c`），工作树干净。
+>
+> **2026-10-22 更新**：完成「标准工具握手」（ADR-0006），
+> 遗留清单里优先级最高的一项已消。详见 §5 第 8 条。
 
 ---
 
@@ -31,6 +34,7 @@
 | 离线自检 | `CAGENT_TRANSPORT=mem` | 不联网，走完整链路 |
 | 六个工具 | read/write/edit/list_dir/search/run_shell | 真实服务已验证 `write_file` 全链路 |
 | 会话持久化 | `/new` `/list` `/resume` `/delete` | `session_smoke.py` + 真实服务 |
+| **标准工具握手** | 自动（`role:"tool"` + `tool_call_id`） | `core_test` 断言**请求体**形状；ADR-0006 |
 
 **Web UI 关键事实**
 
@@ -77,6 +81,10 @@
 - `python -c "…中文…"` 经 PowerShell 会按 GBK 转码破坏 → 含中文一律先 `write` 落盘 .py 再执行。
 - PowerShell here-string 会插值 → 改用 .py 脚本。
 - `CA_TEST(x)` 必须登记到测试文件底部表，否则**静默不跑**。
+- **给跨层共享的结构体加字段时，每一个填充它的地方都要同步改**。
+  漏改的后果是「未初始化指针被当有效值解引用」→ 段错误，
+  编译器不会报，历史路径的单测才撞得上（本轮 `ca_session_export` 就中过）。
+  新字段的默认值要写成**可验证的不变量**（测试钉住），而不是「碰巧是 0」。
 - 相对路径 + `Popen(cwd=…)` 在 POSIX 下找不到程序（Windows 隐形）→ 先 `resolve()`。
 - 临时目录必须带进程号，否则并发测试互相删工作区。
 - `git push` 需重试循环（失败 sleep 8s）。
@@ -96,9 +104,11 @@
 | 5 | search 语义 | 二进制文件跳过必须**说明跳过多少个**（否则模型以为目录里没源码） |
 | 6 | **Web UI** | 全新能力：HTTP/SSE + 结构化事件 + 内嵌页面 + 四道安全闸 + 三个真 bug（SSE 截断丢事件、头部截断导致带令牌也 401、fd 复用泄露） |
 | 7 | POSIX 构建 | `ca_net_thread_ctx` 不完整类型、`pthread_cond_cond_broadcast` 拼错、`struct timeval` 缺头文件、页面超长字面量（→110 片段）、**`realpath` 隐式声明**（glibc<2.28 指针截断） |
+| 8 | **标准工具握手** | 工具结果从「尾随 user 消息」改为 `role:"tool"` + `tool_call_id`，并回带 assistant 的 `tool_calls`（根治模型重复请求同一工具）；顺手删掉 `llm.h` 里 `ca_llm_build_request_full` 的重复声明；踩到一个**真 bug**：结构体加字段而 `ca_session_export` 没同步 → 未初始化指针被解引用 → 段错误（已修 + 加不变量断言钉住） |
 
-**验证基线（当前）**：`ctest` 8/8；`core_test` 205 检查 / `session_test` 1731 / `tools_test` 128 / `ui_test` 63 —— 全 0 失败；
-`mem_load --turns 500` 峰值 7.71 MB；`posix_check.sh` ALL CLEAN；两个 Web 冒烟 PASS；CI 三平台绿。
+**验证基线（当前）**：`ctest` 8/8；`core_test` 222 检查 / `session_test` 1735 / `llm_test` 74 /
+`tools_test` 128 / `ui_test` 63 / `json_test` 74 / `sse_test` 84 / `http_test` 25 / `mem_test` 37 —— 全 0 失败；
+`mem_load --turns 500` 峰值 8.04 MB；`posix_check.sh` ALL CLEAN；两个 Web 冒烟 PASS。
 
 ---
 
@@ -106,7 +116,7 @@
 
 | 优先 | 项 | 说明 |
 |------|-----|------|
-| 高 | 工具结果**标准握手** | 现在是 user 角色尾随 `<result>` 块；OpenAI 规范是 `role:"tool"` + `tool_call_id`（需回带 assistant 的 `tool_calls`）。模型偶尔重复请求同一工具，已用「已执行/被拒绝」措辞缓解 |
+| ~~高~~ | ~~工具结果**标准握手**~~ | **已做**（2026-10-22，ADR-0006）：`role:"tool"` + `tool_call_id`，并回带 assistant 的 `tool_calls`；见 `product/docs/audit/2026-10-22-cpp-implementer-tool-handshake.md` |
 | 中 | `search` 正则 | 现仅字面匹配（契约 §5.1 原文含正则） |
 | 中 | US-8 非 OpenAI 兼容格式 | 未做 |
 | 中 | 性能实测 | US-1 <500 ms / US-2 首字 <2 s 无数据 |
@@ -120,11 +130,13 @@
 
 ## 7. 下一步建议（挑一个做，别摊大饼）
 
-1. **标准 tool 握手**（价值最高：解决模型重复调用；约 200 行，需扩消息结构与序列化）
-2. **`search` 正则**（契约已有承诺，兑现成本低）
-3. **US-8 非 OpenAI 兼容适配层**（`ca_transport_ops` 已是接口，加一个后端即可）
-4. **ASAN/UBSAN CI 任务**（Linux 一条 job 即可，能兜住内存类问题）
-5. **性能实测**（US-1/US-2，把「未验证」变成「已验证」）
+1. **`search` 正则**（契约 §5.1 原文含正则，兑现成本低）
+2. **US-8 非 OpenAI 兼容适配层**（`ca_transport_ops` 已是接口，加一个后端即可；
+   标准握手已把请求侧形状收敛到 `ca_llm_msg`，映射起来不难）
+3. **ASAN/UBSAN CI 任务**（Linux 一条 job 即可，能兜住内存类问题；
+   本轮刚踩过一个「结构体加字段没同步 → 未初始化指针」的段错误，正需要它）
+4. **性能实测**（US-1/US-2，把「未验证」变成「已验证」）
+5. **真机复验标准握手**（真实服务账户限流，本轮只验证了请求体形状，没连真机）
 
 ---
 

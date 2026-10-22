@@ -177,6 +177,14 @@ CA_TEST(session_exports_llm_messages) {
     CA_ASSERT(strcmp(msgs[0].text, "问") == 0);
     CA_ASSERT_EQ_INT(msgs[1].role, CA_MSG_ASSISTANT);
     CA_ASSERT(strcmp(msgs[1].text, "答") == 0);
+    /* 导出的历史消息**不得**携带工具握手字段。
+     * 结构体增字段而生产者没更新，会让序列化器读到未初始化指针
+     * （按「非空 = tool_calls」解引用）——一个立刻段错误的坑。
+     * 这里显式钉住这个不变量。 */
+    CA_ASSERT(msgs[0].tool_calls_json == NULL);
+    CA_ASSERT(msgs[0].tool_call_id == NULL);
+    CA_ASSERT(msgs[1].tool_calls_json == NULL);
+    CA_ASSERT(msgs[1].tool_call_id == NULL);
     ca_session_free(&s);
 }
 

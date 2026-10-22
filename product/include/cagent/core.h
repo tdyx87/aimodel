@@ -149,8 +149,35 @@ typedef struct {
     /* 本轮工具结果累积（回灌用） */
     char results[CA_CORE_MAX_RESULT_BYTES];
     size_t results_len;
+    /* 结果回灌的**有效上限**：由请求体容量倒推（见 ca_core_init）。
+     * 固定缓冲 256 KB 是硬上限，但请求体可以配到 16 KB——
+     * 不倒推的话，超限的结果会「装不进请求体」，
+     * 表现为整轮失败而不是一次显式截断。 */
+    size_t results_cap;
+
+    /* ---- 标准工具握手（contract §5.3）----
+     *
+     * 工具结果不再伪装成「尾随 user 消息」，而是按 OpenAI 规范回灌：
+     *   1. 先回带**助手请求调用工具**的那条消息（含 tool_calls 原文）；
+     *   2. 再逐条回带 role:"tool" + tool_call_id 的结果消息。
+     *
+     * `replay_tool_calls` 是第 1 步的 tool_calls 数组原文，从刚结束的
+     * 那一轮工具调用拼出；`replay_open` 表示它是否有效待回带。
+     * 第 2 步逐条结果存在 `tool_msgs`，文本落在 `results` 缓冲里
+     * （偏移 + 长度），与 `results_len` 共享同一份上限。 */
+    char replay_tool_calls[CA_LLM_MAX_TOOL_CALLS * (CA_LLM_MAX_ID +
+                                                      CA_LLM_MAX_ARGS_BYTES +
+                                                      CA_LLM_MAX_NAME + 128)];
+    int replay_open;
+    struct {
+        char id[CA_LLM_MAX_ID]; /* tool_call_id */
+        size_t off;             /* 文本在 results 中的偏移 */
+        size_t len;             /* 字节数，不含 NUL */
+    } tool_msgs[CA_LLM_MAX_TOOL_CALLS];
+    size_t tool_msg_count;
 
     int rounds;             /* 已用的工具轮次 */
+    const char *turn_user;  /* 本轮的用户输入（单轮模式的握手兜底用） */
     int saw_text;
     /* 本轮工具被**策略**拒绝（不是用户拒绝）：界面与回灌文案要区分。 */
     int deny_by_policy;           /* 本轮是否有增量文本（决定要不要开流） */

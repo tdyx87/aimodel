@@ -353,6 +353,12 @@ CA_TEST(llm_builds_request_with_escaping) {
     CA_ASSERT(strstr(buf, "\"stream\":true") != NULL);
     CA_ASSERT(strstr(buf, "\\\"你好\\\"") != NULL);
     CA_ASSERT(strstr(buf, "\\n") != NULL);
+    /* 单轮构造器产出的必须是**普通 user 消息**：不得带任何工具握手字段。
+     * 这条单轮消息由 memset 初始化过工具字段——若哪天有人图省事改成
+     * 栈上未初始化，这里会立刻抓到（"非空 = 是 tool_calls"）。 */
+    CA_ASSERT(strstr(buf, "\"tool_calls\"") == NULL);
+    CA_ASSERT(strstr(buf, "\"tool_call_id\"") == NULL);
+    CA_ASSERT(strstr(buf, "\"role\":\"user\"") != NULL);
 }
 
 CA_TEST(llm_request_rejects_small_buffer_without_truncating) {
@@ -384,6 +390,54 @@ CA_TEST(llm_request_requires_mandatory_fields) {
     CA_ASSERT(ca_llm_build_request(buf, sizeof(buf), &req, NULL) == -1); /* 缺 api_base */
 }
 
+CA_TEST(llm_serializes_standard_tool_handshake) {
+    /* 标准握手的三段消息必须序列化成 OpenAI 规范要求的形状：
+     *   {"role":"assistant","content":null,"tool_calls":[...]}
+     *   {"role":"tool","tool_call_id":"call_1","content":"..."}
+     * 键序与内容都要对——服务端会校验 tool 消息能否配到 tool_calls。 */
+    char buf[2048];
+    ca_llm_msg msgs[3];
+    memset(msgs, 0, sizeof(msgs));
+    msgs[0].role = CA_MSG_USER;
+    msgs[0].text = "读文件";
+    msgs[1].role = CA_MSG_ASSISTANT;
+    msgs[1].text = ""; /* 工具调用帧没有文本 */
+    msgs[1].tool_calls_json =
+        "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.c\\\"}\"}}]";
+    msgs[2].role = CA_MSG_TOOL;
+    msgs[2].text = "<result>ok</result>";
+    msgs[2].tool_call_id = "call_1";
+
+    size_t need = 0;
+    int rc = ca_llm_build_request_msgs(buf, sizeof(buf), "m", NULL, msgs, 3, &need);
+    CA_ASSERT_EQ_INT(rc, 0);
+    /* assistant：content 为 null，tool_calls 原样回带 */
+    CA_ASSERT(strstr(buf, "\"role\":\"assistant\",\"content\":null,\"tool_calls\":") != NULL);
+    CA_ASSERT(strstr(buf, "\"id\":\"call_1\"") != NULL);
+    CA_ASSERT(strstr(buf, "\"type\":\"function\"") != NULL);
+    /* tool：role + tool_call_id + content */
+    CA_ASSERT(strstr(buf, "\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":") != NULL);
+    CA_ASSERT(strstr(buf, "<result>ok</result>") != NULL);
+    /* 产物必须是合法 JSON（能进入对象即证明结构没坏） */
+    ca_json_cursor root;
+    ca_json_init(&root, buf, strlen(buf));
+    CA_ASSERT(ca_json_enter_object(&root) == 0);
+}
+
+CA_TEST(llm_tool_message_requires_an_id) {
+    /* role:"tool" 缺 tool_call_id 在服务端一定是 400。
+     * 与其发出去换一个难懂的报错，不如在构造阶段就判定参数非法。 */
+    char buf[512];
+    ca_llm_msg m;
+    memset(&m, 0, sizeof(m));
+    m.role = CA_MSG_TOOL;
+    m.text = "x";
+    m.tool_call_id = NULL;
+    size_t need = 0;
+    CA_ASSERT(ca_llm_build_request_msgs(buf, sizeof(buf), "m", NULL, &m, 1, &need) == -1);
+}
+
 int main(void) {
     struct { const char *name; void (*fn)(void); } cases[] = {
         {"llm_parses_text_deltas", ca_test_run_llm_parses_text_deltas},
@@ -401,6 +455,8 @@ int main(void) {
         {"llm_builds_request_with_escaping", ca_test_run_llm_builds_request_with_escaping},
         {"llm_request_rejects_small_buffer_without_truncating", ca_test_run_llm_request_rejects_small_buffer_without_truncating},
         {"llm_request_requires_mandatory_fields", ca_test_run_llm_request_requires_mandatory_fields},
+        {"llm_serializes_standard_tool_handshake", ca_test_run_llm_serializes_standard_tool_handshake},
+        {"llm_tool_message_requires_an_id", ca_test_run_llm_tool_message_requires_an_id},
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         ca_test_begin(cases[i].name);

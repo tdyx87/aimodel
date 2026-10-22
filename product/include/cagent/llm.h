@@ -101,13 +101,37 @@ typedef struct {
 typedef enum {
     CA_MSG_USER = 0,
     CA_MSG_ASSISTANT,
-    CA_MSG_SYSTEM
+    CA_MSG_SYSTEM,
+    /* 工具结果消息（OpenAI 规范 role:"tool"）。
+     * 它必须**紧跟**产生该调用的 assistant 消息，并带上 tool_call_id，
+     * 否则服务端会 400 —— 「tool 消息找不到对应的 tool_calls」。 */
+    CA_MSG_TOOL
 } ca_msg_role;
 
-/* 一条历史消息。text 必须 NUL 结尾。 */
+/* 一条消息。text 必须 NUL 结尾（可为空串但不可为 NULL）。
+ *
+ * 支持「标准工具握手」的两种附加形态（二者互斥，都为空时就是普通消息）：
+ *
+ *   - `tool_calls_json` 非空：这是**助手请求调用工具**的那条消息。
+ *     JSON 是 OpenAI 规范的 tool_calls 数组原文（如
+ *     `[{"id":"call_1","type":"function","function":{"name":"read_file",
+ *       "arguments":"{\"path\":\"a.c\"}"}}]`），直接原样写进请求体。
+ *     为什么存原文而不是拆成结构体：这段 JSON 是从服务端响应里
+ *     逐字抄回来的，任何「解析再重新序列化」都可能改变字节
+ *     （键序、转义、数字格式），而服务端会拿它做一致性校验。
+ *
+ *   - `tool_call_id` 非空：这是 role:"tool" 的**结果**消息，指向
+ *     它回应的那次调用。
+ *
+ * 为什么要在消息结构里带上这两个字段：标准握手要求把助手当初发出的
+ * tool_calls **原样回带**，结果才认得出属于哪次调用。早先只回灌一段
+ * 尾随 user 文本，模型看到的是「用户又说话了」，于是把同一个工具
+ * 原样再要一次（见 contract §5.3 的已知局限）。 */
 typedef struct {
     ca_msg_role role;
     const char *text;
+    const char *tool_calls_json; /* 仅 CA_MSG_ASSISTANT；可为 NULL */
+    const char *tool_call_id;    /* 仅 CA_MSG_TOOL；可为 NULL */
 } ca_llm_msg;
 
 /* 把请求体写进定长缓冲。
@@ -138,17 +162,6 @@ int ca_llm_build_request_msgs(char *buf, size_t cap,
  * 为什么由调用方传入而不是本层写死：工具名与参数只有 tools 层是
  * 唯一真相（ca_tools_schema_json），llm 层再写一份必然漂移；
  * 依赖方向也要求如此（core → tools，llm 不认识 tools）。 */
-int ca_llm_build_request_full(char *buf, size_t cap,
-                              const char *model, const char *system,
-                              const ca_llm_msg *msgs, size_t msg_count,
-                              const char *tools_json, size_t *need_len);
-
-/* 同上，另外把工具声明（OpenAI 兼容的 tools 数组 JSON）写进请求体。
- * tools_json 为 NULL/空串时不写该字段。
- *
- * 为什么工具声明由调用方传入而不是本层写死：工具名与参数只有 tools 层
- * 是唯一真相（见 ca_tools_schema_json），llm 层再写一份必然漂移。
- * 依赖方向也要求如此：core → tools，llm 不认识 tools。 */
 int ca_llm_build_request_full(char *buf, size_t cap,
                               const char *model, const char *system,
                               const ca_llm_msg *msgs, size_t msg_count,

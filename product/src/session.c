@@ -203,6 +203,12 @@ void ca_session_export(const ca_session *s, ca_llm_msg *out, size_t *out_count) 
     for (size_t i = 0; i < s->count; i++) {
         out[i].role = (ca_msg_role)s->recs[i].role;
         out[i].text = s->buf + s->recs[i].off;
+        /* 历史消息**绝不**携带工具握手字段。会话层不保留工具回合
+         * （契约 §2.5.6），把它俩显式置 NULL 是必须的：结构体多了
+         * 字段而生产者没更新，序列化器就会读到未初始化的指针并按
+         * 「非空 = 是 tool_calls」去解引用——一个立刻段错误的坑。 */
+        out[i].tool_calls_json = NULL;
+        out[i].tool_call_id = NULL;
     }
     *out_count = s->count;
 }

@@ -342,6 +342,7 @@ static const char *role_name(ca_msg_role r) {
     switch (r) {
         case CA_MSG_SYSTEM: return "system";
         case CA_MSG_ASSISTANT: return "assistant";
+        case CA_MSG_TOOL: return "tool";
         case CA_MSG_USER:
         default: return "user";
     }
@@ -355,6 +356,12 @@ int ca_llm_build_request_full(char *buf, size_t cap,
     if (msgs == NULL && msg_count != 0) return -1;
     for (size_t i = 0; i < msg_count; i++) {
         if (msgs[i].text == NULL) return -1;
+        /* role:"tool" 必须有 tool_call_id，否则服务端一定 400。
+         * 在构造阶段就判为「参数非法」，而不是拖到发请求才失败。 */
+        if (msgs[i].role == CA_MSG_TOOL &&
+            (msgs[i].tool_call_id == NULL || msgs[i].tool_call_id[0] == '\0')) {
+            return -1;
+        }
     }
     if (buf == NULL && cap == 0) return -1; /* 需要能算出长度 */
 
@@ -378,7 +385,44 @@ int ca_llm_build_request_full(char *buf, size_t cap,
             if (i > 0 && append_raw(dst, cap, &len, ",") != 0) { bad = 1; break; }
             if (append_raw(dst, cap, &len, "{\"role\":\"") != 0) { bad = 1; break; }
             if (append_raw(dst, cap, &len, role_name(msgs[i].role)) != 0) { bad = 1; break; }
-            if (append_raw(dst, cap, &len, "\",\"content\":") != 0) { bad = 1; break; }
+            if (append_raw(dst, cap, &len, "\"") != 0) { bad = 1; break; }
+
+            /* role:"tool" 的结果消息：必须带 tool_call_id，
+             * 且**不带** content 之外的字段。键序遵循 OpenAI 示例。 */
+            if (msgs[i].role == CA_MSG_TOOL) {
+                if (msgs[i].tool_call_id == NULL || msgs[i].tool_call_id[0] == '\0') {
+                    /* 没有 id 的 tool 消息在服务端一定是 400；与其发出去
+                     * 换一个难懂的报错，不如在这里就判定参数非法。 */
+                    bad = 1;
+                    break;
+                }
+                if (append_raw(dst, cap, &len, ",\"tool_call_id\":") != 0) { bad = 1; break; }
+                if (write_json_string(dst, cap, &len, msgs[i].tool_call_id) != 0) { bad = 1; break; }
+                if (append_raw(dst, cap, &len, ",\"content\":") != 0) { bad = 1; break; }
+                if (write_json_string(dst, cap, &len, msgs[i].text) != 0) { bad = 1; break; }
+                if (append_raw(dst, cap, &len, "}") != 0) { bad = 1; break; }
+                continue;
+            }
+
+            /* 助手请求调用工具的消息：content 通常是空串，此时写 null
+             * 更贴近规范（绝大多数模型的 assistant tool_calls 帧没有文本）；
+             * tool_calls 原样回带，保证与服务端当初发来的一致。 */
+            if (msgs[i].role == CA_MSG_ASSISTANT &&
+                msgs[i].tool_calls_json != NULL && msgs[i].tool_calls_json[0] != '\0') {
+                if (append_raw(dst, cap, &len, ",\"content\":") != 0) { bad = 1; break; }
+                if (msgs[i].text[0] == '\0') {
+                    if (append_raw(dst, cap, &len, "null") != 0) { bad = 1; break; }
+                } else if (write_json_string(dst, cap, &len, msgs[i].text) != 0) {
+                    bad = 1;
+                    break;
+                }
+                if (append_raw(dst, cap, &len, ",\"tool_calls\":") != 0) { bad = 1; break; }
+                if (append_raw(dst, cap, &len, msgs[i].tool_calls_json) != 0) { bad = 1; break; }
+                if (append_raw(dst, cap, &len, "}") != 0) { bad = 1; break; }
+                continue;
+            }
+
+            if (append_raw(dst, cap, &len, ",\"content\":") != 0) { bad = 1; break; }
             if (write_json_string(dst, cap, &len, msgs[i].text) != 0) { bad = 1; break; }
             if (append_raw(dst, cap, &len, "}") != 0) { bad = 1; break; }
         }
@@ -422,8 +466,11 @@ int ca_llm_build_request(char *buf, size_t cap, const ca_llm_request *req,
     /* 单轮请求 = 历史为空、只有一条 user 的多轮请求。
      * 保留这个函数是为了让既有调用点与测试不必知道历史的存在。 */
     ca_llm_msg only;
+    memset(&only, 0, sizeof(only)); /* 工具握手字段必须是确定的 NULL */
     only.role = CA_MSG_USER;
     only.text = req->user;
+    only.tool_calls_json = NULL;
+    only.tool_call_id = NULL;
     return ca_llm_build_request_msgs(buf, cap, req->model, req->system,
                                      &only, 1, need_len);
 }

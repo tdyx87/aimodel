@@ -17,6 +17,7 @@
 #include "ca_test.h"
 
 #include "cagent/core.h"
+#include "cagent/json.h"
 #include "cagent/ui.h"
 
 #include <stdio.h>
@@ -86,10 +87,14 @@ static int g_req_count;
 /* 捕获请求体：证明「多轮记忆」真的到了线上，而不只是躺在内存里。
  * 只留最近几个，够断言用，不随用例数增长。
  *
- * 单个缓冲 20 KB：淘汰用例的请求体接近 16 KB 上限，早先写 4096 时
- * 末尾的「最新问题」会被**截断在捕获缓冲里**，断言「请求里带了最新
- * 问题」就会假阴性——捕获缓冲太小也是一种测试缺陷。 */
-static char g_bodies[4][20480];
+ * 捕获缓冲必须**容得下整个请求体**：早先写 4096 时，末尾的「最新问题」
+ * 会被截断在捕获缓冲里，断言「请求里带了最新问题」就会假阴性——
+ * 捕获缓冲太小也是一种测试缺陷。
+ * 现在请求体上限是 256 KB（CA_CORE_DEFAULT_CONTEXT_BYTES），
+ * 而工具结果回灌测试要断言**截断标注在末尾**，所以缓冲取 320 KB。
+ * 4 × 320 KB 是静态内存，不影响被测进程的 RSS。 */
+#define CA_BODY_CAPTURE_BYTES (320u * 1024u)
+static char g_bodies[4][CA_BODY_CAPTURE_BYTES];
 static int g_body_count;
 
 /* 默认成功；需要模拟 4xx 的用例自己改，用完复位。
@@ -164,6 +169,24 @@ static void ws_file_remove(const char *name) {
     char probe[1024];
     snprintf(probe, sizeof(probe), "%s%c%s", g_ws_dir, g_sep, name);
     remove(probe);
+}
+
+/* 在工作区里造一个指定大小的大文件（用于触发结果缓冲的截断路径）。 */
+static int ws_file_make_big(const char *name, size_t bytes) {
+    char probe[1024];
+    snprintf(probe, sizeof(probe), "%s%c%s", g_ws_dir, g_sep, name);
+    FILE *f = fopen(probe, "wb");
+    if (f == NULL) return -1;
+    char chunk[1024];
+    memset(chunk, 'A', sizeof(chunk));
+    size_t left = bytes;
+    while (left > 0) {
+        size_t n = (left < sizeof(chunk)) ? left : sizeof(chunk);
+        if (fwrite(chunk, 1, n, f) != n) { fclose(f); return -1; }
+        left -= n;
+    }
+    fclose(f);
+    return 0;
 }
 
 /* 权限三种形态：
@@ -305,6 +328,167 @@ CA_TEST(core_denied_tool_result_says_it_did_not_run) {
     CA_ASSERT(g_req_count >= 2);
     CA_ASSERT(strstr(g_bodies[1], "did NOT run") != NULL);
     CA_ASSERT(strstr(g_bodies[1], "already been executed") == NULL);
+}
+
+CA_TEST(core_uses_standard_tool_handshake) {
+    /* 标准工具握手（contract §5.3）：
+     * 工具结果必须以 role:"tool" + tool_call_id 回灌，并且**先**回带
+     * 助手当初发出 tool_calls 的那条消息。
+     *
+     * 早先的做法是把结果塞进一条尾随 user 消息——模型看到的是
+     * 「用户又说话了」，于是把同一个工具原样再要一次，用户被迫
+     * 反复批准同一件事。标准握手从结构上解决它。
+     *
+     * 这里断言的是**请求体**：只有它骗不了人，内存结构对不对都无所谓。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"call_abc\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"handshake.txt\\\",\\\"content\\\":\\\"hi\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 1;
+    setup(NULL, "y");
+    (void)ca_core_run_once(&g_core, "写文件");
+    ws_file_remove("handshake.txt");
+    CA_ASSERT(g_req_count >= 2);
+
+    /* 1. 助手那条 tool_calls 消息必须原样回带。
+     *    **必须是数组** `[...]`——早先漏了方括号，产出的是对象
+     *    `{"id":...}`，服务端会直接 400。手写带方括号的单元测试
+     *    永远看不出这个错，只有看真实请求体才抓得到。 */
+    CA_ASSERT(strstr(g_bodies[1], "\"tool_calls\":[{\"id\":\"call_abc\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "\"type\":\"function\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "write_file") != NULL);
+    /* 2. 结果消息必须是 role:"tool" 且带 tool_call_id */
+    CA_ASSERT(strstr(g_bodies[1], "\"role\":\"tool\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "\"tool_call_id\":\"call_abc\"") != NULL);
+    /* 3. 结果**不能**再伪装成尾随 user 消息：历史里只有本轮那一条 user */
+    const char *u1 = strstr(g_bodies[1], "\"role\":\"user\"");
+    CA_ASSERT(u1 != NULL);
+    CA_ASSERT(strstr(u1 + 1, "\"role\":\"user\"") == NULL);
+    /* 4. assistant 的 tool_calls 消息必须排在 tool 结果之前 */
+    const char *tc = strstr(g_bodies[1], "\"tool_calls\"");
+    const char *toolrole = strstr(g_bodies[1], "\"role\":\"tool\"");
+    CA_ASSERT(tc != NULL && toolrole != NULL);
+    CA_ASSERT(tc < toolrole);
+    /* 5. 整个请求体必须是合法 JSON：能进根对象即证明结构没坏。
+     *    子串匹配看不出「tool_calls 是对象不是数组」这种错，
+     *    而解析器能。 */
+    {
+        ca_json_cursor root;
+        ca_json_init(&root, g_bodies[1], strlen(g_bodies[1]));
+        CA_ASSERT(ca_json_enter_object(&root) == 0);
+    }
+    g_perm_kind = 0;
+}
+
+CA_TEST(core_handshake_places_each_result_in_its_own_tool_message) {
+    /* 一轮里模型并发请求**两个**工具时，结果必须是两条独立的
+     * role:"tool" 消息，各自带自己的 tool_call_id——而不是拼成一坨。
+     * 服务端按 id 配对，拼在一起会错配。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+           "{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"hs_a.txt\\\",\\\"content\\\":\\\"a\\\"}\"}},"
+           "{\"index\":1,\"id\":\"call_2\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"hs_b.txt\\\",\\\"content\\\":\\\"b\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 1;
+    setup(NULL, "yy");
+    (void)ca_core_run_once(&g_core, "写两个文件");
+    ws_file_remove("hs_a.txt");
+    ws_file_remove("hs_b.txt");
+    CA_ASSERT(g_req_count >= 2);
+    CA_ASSERT(strstr(g_bodies[1], "\"tool_call_id\":\"call_1\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "\"tool_call_id\":\"call_2\"") != NULL);
+    /* 两个调用都在**同一个数组**里，顺序与模型发出的一致 */
+    CA_ASSERT(strstr(g_bodies[1], "\"tool_calls\":[{\"id\":\"call_1\"") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "{\"id\":\"call_2\"") != NULL);
+    /* 数一下 role:"tool" 出现次数——必须是 2 */
+    int n_tool = 0;
+    for (const char *p = g_bodies[1]; (p = strstr(p, "\"role\":\"tool\"")) != NULL; p++) {
+        n_tool++;
+    }
+    CA_ASSERT_EQ_INT(n_tool, 2);
+    g_perm_kind = 0;
+}
+
+CA_TEST(core_truncates_oversized_tool_result_explicitly) {
+    /* 工具结果超过回灌缓冲上限时，必须**显式标注**截断，且
+     * 请求体必须仍是**完整合法**的 JSON。
+     *
+     * 两条容易踩的坑（都真实存在过）：
+     *   1. 截断处不写 NUL 结尾 → 序列化器按 C 字符串读，一路读出缓冲区；
+     *   2. 截断时把 results_len 回缩到某条消息起点之前 →
+     *      那条消息的长度下溢成天文数字，越界读。
+     * 所以断言不只看「有没有标注」，还要看**请求体是否完整**。 */
+    const size_t kBig = 300u * 1024u; /* > 回灌缓冲 256 KB */
+    CA_ASSERT_EQ_INT(ws_file_make_big("big_read.txt", kBig), 0);
+
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"call_big\",\"function\":{\"name\":\"read_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"big_read.txt\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 1;
+    setup(NULL, "y");
+    (void)ca_core_run_once(&g_core, "读大文件");
+    ws_file_remove("big_read.txt");
+    CA_ASSERT(g_req_count >= 2);
+
+    /* 必须显式标注截断 */
+    CA_ASSERT(strstr(g_bodies[1], "已截断") != NULL);
+    /* 请求体必须完整：末尾是 tools 数组 + 根对象闭合。
+     * 若截断把 JSON 切断了，这里立刻不成立。 */
+    size_t blen = strlen(g_bodies[1]);
+    CA_ASSERT(blen > 3);
+    CA_ASSERT(strcmp(g_bodies[1] + blen - 3, "}]}") == 0);
+    /* 而且必须是**合法 JSON**——能进根对象即证明没被切坏 */
+    {
+        ca_json_cursor root;
+        ca_json_init(&root, g_bodies[1], blen);
+        CA_ASSERT(ca_json_enter_object(&root) == 0);
+    }
+    g_perm_kind = 0;
+}
+
+CA_TEST(core_shrinks_tool_result_to_fit_a_small_context) {
+    /* 请求体上限配到最小（16 KB）时，工具结果必须**按请求体容量截断**，
+     * 而不是「结果缓冲固定 256 KB → 必然装不下 → 整轮失败」。
+     *
+     * 真实故障：回灌缓冲固定 256 KB、请求体默认也是 256 KB（还能配到 16 KB）。
+     * 于是「结果填满缓冲」必然意味着「请求体装不下」，用户看到的是
+     * 「单轮内容超出上下文上限」；把 context 配小一点，代理直接不可用。
+     *
+     * 截断器的职责是「保证请求还发得出去」，不是「尽量多塞」。 */
+    const size_t kBig = 200u * 1024u; /* 远大于 16 KB 的请求体 */
+    CA_ASSERT_EQ_INT(ws_file_make_big("small_ctx.txt", kBig), 0);
+
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"call_small\",\"function\":{\"name\":\"read_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"small_ctx.txt\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 1;
+    g_context_bytes = CA_CORE_MIN_CONTEXT_BYTES; /* 16 KB */
+    setup(NULL, "y");
+    ca_core_status st = ca_core_run_once(&g_core, "读大文件");
+    ws_file_remove("small_ctx.txt");
+
+    /* 关键：不能因为装不下就整轮失败 */
+    CA_ASSERT_EQ_INT(st, CA_CORE_OK);
+    CA_ASSERT(g_req_count >= 2);
+    /* 必须显式标注截断 */
+    CA_ASSERT(strstr(g_bodies[1], "已截断") != NULL);
+    /* 请求体必须完整且合法 */
+    size_t blen = strlen(g_bodies[1]);
+    CA_ASSERT(blen > 3);
+    CA_ASSERT(strcmp(g_bodies[1] + blen - 3, "}]}") == 0);
+    {
+        ca_json_cursor root;
+        ca_json_init(&root, g_bodies[1], blen);
+        CA_ASSERT(ca_json_enter_object(&root) == 0);
+    }
+    g_perm_kind = 0;
 }
 
 CA_TEST(core_offers_tools_to_the_model) {
@@ -755,6 +939,10 @@ int main(void) {
         {"core_rejects_malformed_response", ca_test_run_core_rejects_malformed_response},
         {"core_tool_result_tells_model_the_tool_already_ran", ca_test_run_core_tool_result_tells_model_the_tool_already_ran},
         {"core_denied_tool_result_says_it_did_not_run", ca_test_run_core_denied_tool_result_says_it_did_not_run},
+        {"core_uses_standard_tool_handshake", ca_test_run_core_uses_standard_tool_handshake},
+        {"core_handshake_places_each_result_in_its_own_tool_message", ca_test_run_core_handshake_places_each_result_in_its_own_tool_message},
+        {"core_truncates_oversized_tool_result_explicitly", ca_test_run_core_truncates_oversized_tool_result_explicitly},
+        {"core_shrinks_tool_result_to_fit_a_small_context", ca_test_run_core_shrinks_tool_result_to_fit_a_small_context},
         {"core_offers_tools_to_the_model", ca_test_run_core_offers_tools_to_the_model},
         {"core_policy_denial_does_not_ask_the_user", ca_test_run_core_policy_denial_does_not_ask_the_user},
         {"core_surfaces_http_error_body", ca_test_run_core_surfaces_http_error_body},

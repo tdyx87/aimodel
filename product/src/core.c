@@ -122,6 +122,34 @@ ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
     c->body_cap = cap;
     /* cfg 里的原值不再有意义：后面只认 body_cap。 */
     c->cfg.context_bytes = cap;
+
+    /* 工具结果的回灌上限必须**由请求体容量倒推**，不能是固定值。
+     *
+     * 真实故障：回灌缓冲固定 256 KB，而请求体默认也是 256 KB
+     * （还可能被配到 16 KB 下限）。于是「工具结果填满回灌缓冲」
+     * 必然意味着「请求体装不下」——不是截断，而是**整轮失败**，
+     * 用户看到的是「单轮内容超出上下文上限」。
+     * 把 context 配小一点，代理就彻底不可用了。
+     *
+     * 正确做法：给「非工具结果」的部分预留空间，剩下的才是结果配额。
+     * 预留 = 工具声明 + 系统提示 + 一段余量（JSON 包装、用户输入、
+     * assistant 的 tool_calls 回带）。
+     *
+     * 截断器（契约 C4）的作用是「保证请求还发得出去」，
+     * 不是「尽量多塞」——塞不下就发不出去。 */
+    size_t reserve = 8u * 1024u; /* JSON 包装 + 用户输入 + tool_calls 回带的余量 */
+    reserve += strlen(ca_tools_schema_json());
+    reserve += strlen(c->system_buf);
+    if (reserve + 1024u > cap) {
+        /* 空间小到连一份工具结果都放不下：配额取 0，
+         * 工具结果会被完整标注为「已截断」，而不是让请求失败。 */
+        c->results_cap = 0;
+    } else {
+        c->results_cap = cap - reserve;
+        if (c->results_cap > sizeof(c->results)) {
+            c->results_cap = sizeof(c->results);
+        }
+    }
     return CA_CORE_OK;
 }
 
@@ -259,10 +287,15 @@ static int on_data(const unsigned char *data, size_t n, void *user) {
  *
  * user_in_history=1 表示 user_text **已经在会话历史里**（本轮的首次请求，
  * 我们刚把它记进去），此时只带历史；
- * =0 表示 user_text 是历史之外的一条（工具结果回灌），追加在历史之后。
+ * =0 表示 user_text 是历史之外的一条（仅用于无会话单轮模式的兜底）。
  *
  * 这个区分是必要的：把同一条用户输入既放进历史又当作尾随消息，
  * 模型会看到重复的问题，回答也会开始重复。
+ *
+ * 历史之后追加的是**标准工具握手**的回带消息（若处于工具循环中）：
+ * 一条 assistant（带 tool_calls 原文）+ 若干 role:"tool" 的结果。
+ * 这些不在会话历史里（契约 §2.5.6：工具回合不跨输入保留），
+ * 只在当前这次输入的循环内有效。
  *
  * 历史放不下时不在这里处理——core_one_turn 会从**最旧的一端**丢弃
  * 完整轮次后重试。构造器只负责如实报告「需要多少字节」。
@@ -270,25 +303,57 @@ static int on_data(const unsigned char *data, size_t n, void *user) {
 static void core_collect_msgs(ca_core *c, const char *user_text,
                               int user_in_history, ca_llm_msg *msgs,
                               size_t *out_n) {
-    /* +1 给尾随的工具结果消息。栈上约 8 KB，不放进 ca_core
-     * ——ca_core 已经很大，再塞进去只会让「别把 ca_core 放栈上」更危险。 */
-    static const size_t kMaxMsgs = CA_SESSION_MAX_MSGS + 1;
+    /* 上限：会话消息 + assistant tool_calls + 每条结果 + 可能的尾随 user。 */
+    static const size_t kMaxMsgs =
+        CA_SESSION_MAX_MSGS + 1 + CA_LLM_MAX_TOOL_CALLS + 1;
     size_t n = 0;
     if (c->cfg.session != NULL) {
         ca_session_export(c->cfg.session, msgs, &n);
         if (n > CA_SESSION_MAX_MSGS) n = CA_SESSION_MAX_MSGS; /* 防御，不可能发生 */
     }
-    if (n == 0) {
+    if (n == 0 && !c->replay_open) {
         /* 无会话（单轮模式），或历史为空（例如空输入没被记进历史）：
          * 这一条就是全部上下文。**不能**因为 user_in_history=1 就什么都不放——
          * 空请求体会让每一轮都报「超出上下文上限」。 */
         msgs[0].role = CA_MSG_USER;
         msgs[0].text = user_text;
+        msgs[0].tool_calls_json = NULL;
+        msgs[0].tool_call_id = NULL;
         n = 1;
-    } else if (!user_in_history) {
+    } else if (n == 0 && c->replay_open) {
+        /* 单轮模式的工具握手：请求里仍要先带上**本轮的原始用户输入**，
+         * 否则只剩「assistant 调工具 + tool 结果」，没有问题可答。 */
+        msgs[0].role = CA_MSG_USER;
+        msgs[0].text = (c->turn_user != NULL) ? c->turn_user : "";
+        msgs[0].tool_calls_json = NULL;
+        msgs[0].tool_call_id = NULL;
+        n = 1;
+    } else if (!user_in_history && !c->replay_open && n > 0) {
+        /* 历史之外的一条**用户**消息。工具循环走的是 replay 分支，
+         * 不会再走到这里——避免把工具结果当用户消息发出去。 */
         if (n >= kMaxMsgs) n = kMaxMsgs - 1;
         msgs[n].role = CA_MSG_USER;
         msgs[n].text = user_text;
+        msgs[n].tool_calls_json = NULL;
+        msgs[n].tool_call_id = NULL;
+        n++;
+    }
+
+    /* 标准工具握手回带：assistant(tool_calls) + 逐条 tool 结果。 */
+    if (c->replay_open && n < kMaxMsgs) {
+        msgs[n].role = CA_MSG_ASSISTANT;
+        /* assistant 的文本部分：工具轮次里通常为空（模型直接调工具）。
+         * 用空串而非 NULL——序列化器据「text 为空」决定写 content:null。 */
+        msgs[n].text = "";
+        msgs[n].tool_calls_json = c->replay_tool_calls;
+        msgs[n].tool_call_id = NULL;
+        n++;
+    }
+    for (size_t i = 0; i < c->tool_msg_count && n < kMaxMsgs; i++) {
+        msgs[n].role = CA_MSG_TOOL;
+        msgs[n].text = c->results + c->tool_msgs[i].off;
+        msgs[n].tool_calls_json = NULL;
+        msgs[n].tool_call_id = c->tool_msgs[i].id;
         n++;
     }
     *out_n = n;
@@ -361,9 +426,16 @@ static void core_note_transport_error(ca_core *c, ca_http_status hs) {
 
 static ca_core_status core_one_turn(ca_core *c, const char *user_text,
                                     int user_in_history) {
-    ca_llm_msg msgs[CA_SESSION_MAX_MSGS + 1];
+    /* 会话上限 + assistant tool_calls + 各条 tool 结果 + 尾随 user。 */
+    ca_llm_msg msgs[CA_SESSION_MAX_MSGS + 1 + CA_LLM_MAX_TOOL_CALLS + 1];
     size_t nmsg = 0;
     core_collect_msgs(c, user_text, user_in_history, msgs, &nmsg);
+
+    /* 回带块（assistant tool_calls + tool 结果）不允许被部分丢弃：
+     * 拆散它们会让服务端看到「有 tool 结果却没有对应调用」而 400。
+     * 因此可丢弃的只到 hist_count 为止，回带块要么整块保留，要么整轮报错。 */
+    size_t replay_n = (c->replay_open ? 1 : 0) + c->tool_msg_count;
+    size_t hist_count = (nmsg >= replay_n) ? (nmsg - replay_n) : 0;
 
     size_t drop = 0;
     size_t need = 0;
@@ -380,12 +452,13 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
         }
         /* 缓冲不足：丢掉最旧的完整轮次再试。
          * 没有会话（单轮模式）时无可丢弃，直接报错。 */
-        if (c->cfg.session == NULL) {
+        if (c->cfg.session == NULL || drop >= hist_count) {
             drop = nmsg;
             break;
         }
         size_t next = core_next_turn(msgs, nmsg, drop);
-        if (next >= nmsg) {
+        /* 只允许丢到回带块之前；越过它就没有可丢的历史了。 */
+        if (next >= hist_count) {
             /* 只剩最后一轮（或只有一条消息）也放不下：这是**单轮内容**
              * 超限，不是历史太长。此时截断请求体只会让模型看到半截输入，
              * 明确报错并给出可操作的建议才对。 */
@@ -575,56 +648,168 @@ static ca_permission core_perm(const char *tool_name, void *user) {
     return CA_PERM_ALLOW;
 }
 
-static void results_append(ca_core *c, const char *s) {
+/* ---- 标准工具握手的结果消息构造 ---- */
+
+/* 开始一条新的 role:"tool" 结果消息：登记它的 tool_call_id 与文本起点。
+ * 返回该消息在 c->tool_msgs 中的下标，满了返回 -1。 */
+static int tool_msg_begin(ca_core *c, const char *id) {
+    if (c->tool_msg_count >= CA_LLM_MAX_TOOL_CALLS) return -1;
+    size_t i = c->tool_msg_count++;
+    /* id 为空时给一个占位：服务端要求 tool 消息必须有 tool_call_id，
+     * 而某些服务不发 id（或我们没拿到）。空 id 会让整条请求 400，
+     * 不如用一个稳定的占位，至少语义上「对应这个序号」。 */
+    if (id != NULL && id[0] != '\0') {
+        size_t n = strlen(id);
+        if (n >= sizeof(c->tool_msgs[i].id)) n = sizeof(c->tool_msgs[i].id) - 1;
+        memcpy(c->tool_msgs[i].id, id, n);
+        c->tool_msgs[i].id[n] = '\0';
+    } else {
+        snprintf(c->tool_msgs[i].id, sizeof(c->tool_msgs[i].id), "call_%lu",
+                 (unsigned long)i);
+    }
+    c->tool_msgs[i].off = c->results_len;
+    c->tool_msgs[i].len = 0;
+    return (int)i;
+}
+
+/* 截断标注。**格式串纯 ASCII**：MSVC 对含中文的格式串会误报 C4474，
+ * 而零告警是 CI 硬门禁——中文一律作为参数传。 */
+#define CA_TRUNC_NOTE "工具结果已截断：超过上限"
+
+/* 往当前工具结果消息尾追加文本。超上限时**显式标注**（不静默截断）。
+ *
+ * 两条硬规矩：
+ *   1. 结果缓冲里的每条消息都必须**NUL 结尾**——序列化器按 C 字符串读它，
+ *      没有 NUL 就会一路读出缓冲区（越界读）。
+ *   2. `results_len` **只增不减**：它是各条消息的偏移基准，
+ *      一旦被回缩到某条消息起点之前，那条消息的长度就会下溢成天文数字。
+ *      早先的截断逻辑正是这么写的（既没写 NUL，也可能回缩），
+ *      这里一并修掉。 */
+static void tool_msg_append(ca_core *c, size_t idx, const char *s) {
+    if (idx >= c->tool_msg_count) return;
     size_t n = strlen(s);
-    if (c->results_len + n + 1 > sizeof(c->results)) {
+    size_t avail = c->results_cap;
+    if (avail > sizeof(c->results)) avail = sizeof(c->results);
+
+    char tail[128];
+    int tn = snprintf(tail, sizeof(tail), "\n[%s %lu 字节]", CA_TRUNC_NOTE,
+                      (unsigned long)avail);
+    if (tn < 0 || (size_t)tn >= sizeof(tail)) {
+        tail[0] = '\0';
+        tn = 0;
+    }
+    size_t tlen = (size_t)tn;
+
+    if (avail == 0) {
+        /* 配额为 0（请求体小到放不下任何结果）：只留标注，不写正文。
+         * 标注必须写在**本条消息自己的**位置上——否则多条消息会互相覆盖，
+         * 后一条的指针会指到前一条的内容上。 */
+        if (c->results_len + tlen + 1 <= sizeof(c->results)) {
+            memcpy(c->results + c->results_len, tail, tlen + 1);
+            c->results_len += tlen;
+            c->tool_msgs[idx].len = tlen;
+        }
+        return;
+    }
+    if (c->results_len + n + 1 > avail) {
         /* 静默截断会让模型基于半截结果下结论。
          * 明确标注，与工具结果的截断约定一致。 */
-        static const char tail[] = "\n[工具结果已截断：超过上限]";
-        size_t keep = sizeof(c->results) - sizeof(tail);
-        if (c->results_len < keep) {
-            c->results_len = keep;
-            memcpy(c->results + keep - sizeof(tail) + 1, tail, sizeof(tail) - 1);
+        /* 还能写多少字节（给结尾 NUL 留一个）。 */
+        size_t room = avail - c->results_len - 1;
+        if (room > tlen) {
+            /* 放得下标注：正文砍掉一部分，末尾写标注。 */
+            size_t keep_text = room - tlen;
+            if (keep_text < n) n = keep_text;
+            memcpy(c->results + c->results_len, s, n);
+            c->results_len += n;
+            memcpy(c->results + c->results_len, tail, tlen);
+            c->results_len += tlen;
+        } else if (room > 0) {
+            /* 连标注都放不下：只写能写的部分，并**显式**留一个省略标记。 */
+            memcpy(c->results + c->results_len, s, room);
+            c->results_len += room;
         }
+        c->results[c->results_len] = '\0';
+        c->tool_msgs[idx].len = c->results_len - c->tool_msgs[idx].off;
         return;
     }
     memcpy(c->results + c->results_len, s, n + 1);
     c->results_len += n;
+    c->tool_msgs[idx].len = c->results_len - c->tool_msgs[idx].off;
 }
 
 /* 工具结果回灌时必须说明「工具已经跑完了」。
  *
- * 真实模型上的现场：GLM 收到工具结果（以 user 消息回灌）后，
- * 会**原样再要一次同一个工具**——因为它看到的是「用户又发了一段话」，
- * 而不是「你刚才那次调用的结果」。于是同一个写文件请求被反复请求，
- * 用户要一次次批准。
+ * 标准握手（role:"tool" + tool_call_id）已经从结构上解决了大部分
+ * 「模型不知道这是结果」的困惑，但措辞依然有用：它明确区分
+ * 「执行了」与「被拒了」——被拒的工具**没有执行**，
+ * 说成「已执行」会让模型以为文件已经写好了，那正是最坏的情况。
  *
- * 明确告诉它「工具已执行、这是结果、请据此继续」，重复调用明显减少。
- * 这不是万能药：OpenAI 规范里的 `role:"tool"` + `tool_call_id` 握手
- * 才是根本解（见 audit 的遗留项），但在当前实现下这句提示是必需的。
- *
- * 措辞必须区分「执行了」和「被拒了」：被拒的工具**没有执行**，
- * 说成「已执行」会让模型以为文件已经写好了——那正是最坏的情况。 */
-static void results_append_notice(ca_core *c, const char *tool_name,
-                                  ca_tool_status ts) {
+ * 措辞必须区分「执行了」和「被拒了」。 */
+static void tool_msg_append_notice(ca_core *c, size_t idx, const char *tool_name,
+                                   ca_tool_status ts) {
     char note[320];
     /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，零告警是硬门禁。 */
     if (ts == CA_TOOL_DENIED) {
         snprintf(note, sizeof(note),
-                 "<tool_result tool=\"%s\" status=\"denied\">"
+                 "\n<tool_result tool=\"%s\" status=\"denied\">"
                  "The user declined this call, so the tool did NOT run. "
                  "Do not retry the same call; explain what you would do "
                  "instead or ask the user how to proceed.</tool_result>\n",
                  tool_name != NULL ? tool_name : "");
     } else {
         snprintf(note, sizeof(note),
-                 "<tool_result tool=\"%s\" status=\"done\">"
+                 "\n<tool_result tool=\"%s\" status=\"done\">"
                  "The tool has already been executed. "
                  "Use this result to continue; do not call the same tool again "
                  "unless the result shows it failed.</tool_result>\n",
                  tool_name != NULL ? tool_name : "");
     }
-    results_append(c, note);
+    tool_msg_append(c, idx, note);
+}
+
+/* 用本轮的工具槽位拼出 assistant 消息的 tool_calls 数组原文。
+ *
+ * 逐字回带 id / name / arguments —— 服务端会拿它跟当初发来的做一致性
+ * 校验，任何「重新序列化」导致的变化（键序、转义）都可能被拒。
+ * 只写规范要求的三个键：id / type / function{name,arguments}。 */
+static int build_replay_tool_calls(ca_core *c) {
+    char *buf = c->replay_tool_calls;
+    /* 留一个字节给结尾的 NUL：ca_json_write_raw 只保证不写出 cap，
+     * 若把 cap 原样传进去，len 可以正好等于 cap，
+     * 随后的 buf[len]='\0' 就是**越界写一个字节**。 */
+    size_t cap = sizeof(c->replay_tool_calls) - 1;
+    size_t len = 0;
+    int first = 1;
+    buf[0] = '\0';
+    /* **必须是数组**：[{"id":...},{"id":...}]
+     * 早先漏了方括号，产出的是 {"id":...} —— 那是个**对象**，
+     * 服务端会直接 400。端到端断言（看真实请求体）才抓得到：
+     * 手写带方括号的单元测试永远看不出这个错。 */
+    if (ca_json_write_raw(buf, cap, &len, "[") != 0) return -1;
+    for (int i = 0; i < c->slot_count; i++) {
+        const ca_llm_tool_slot *s = &c->slots[i];
+        /* 只回带**真的执行过**的调用（有名字、参数不超限）：
+         * 参数超限的压根没执行，回带它等于告诉模型「这是你的调用结果」，
+         * 但下面并没有对应的 tool 消息，服务端会因缺结果而 400。 */
+        if (s->args_overflow || s->name[0] == '\0' || s->args_len == 0) continue;
+        if (!first) {
+            if (ca_json_write_raw(buf, cap, &len, ",") != 0) return -1;
+        }
+        first = 0;
+        if (ca_json_write_raw(buf, cap, &len, "{\"id\":") != 0) return -1;
+        if (ca_json_write_string(buf, cap, &len, s->id) != 0) return -1;
+        if (ca_json_write_raw(buf, cap, &len, ",\"type\":\"function\",\"function\":{\"name\":") != 0)
+            return -1;
+        if (ca_json_write_string(buf, cap, &len, s->name) != 0) return -1;
+        if (ca_json_write_raw(buf, cap, &len, ",\"arguments\":") != 0) return -1;
+        if (ca_json_write_string(buf, cap, &len, s->args) != 0) return -1;
+        if (ca_json_write_raw(buf, cap, &len, "}}") != 0) return -1;
+    }
+    if (len == 0 || first) return -1; /* 没有任何可回带的调用 */
+    if (ca_json_write_raw(buf, cap, &len, "]") != 0) return -1;
+    buf[len] = '\0';
+    return 0;
 }
 
 /* 把工具名映射到具体的执行函数。未知的工具名一律拒绝执行——
@@ -664,6 +849,11 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
     int denied = 0;
     /* 本轮首次请求：用户输入已经记进历史，请求体里不再重复追加。 */
     int user_in_history = 1;
+
+    /* 无会话（单轮）模式下，工具握手轮次的请求里必须**仍带这一轮的
+     * 用户输入**——否则请求会变成「assistant 调工具 + tool 结果」，
+     * 完全没有问题可答。会话模式下它已在历史里，不需要这里兜底。 */
+    c->turn_user = user_input;
 
     if (c->cfg.session != NULL) {
         /* 记不进历史（空串）不影响本轮问答本身，照常继续。 */
@@ -723,6 +913,8 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
 
         c->results_len = 0;
         c->results[0] = '\0';
+        c->tool_msg_count = 0;
+        c->replay_open = 0;
 
         for (int i = 0; i < c->slot_count; i++) {
             const ca_llm_tool_slot *s = &c->slots[i];
@@ -786,19 +978,32 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
             } else if (ts != CA_TOOL_OK) {
                 ca_ui_warn(c->cfg.ui, "（该工具未成功，结果见上）");
             }
-            if (c->tout.len > 0) results_append(c, c->tool_out);
-            /* 附一句说明工具的状态：真实模型收到裸结果会原样再要一次
-             * 同一个工具，用户被迫反复批准。措辞区分「已执行」与「被拒绝」。 */
-            results_append_notice(c, s->name, ts);
+
+            /* 标准握手：本次调用的结果成为一条 role:"tool" 消息，
+             * 带 tool_call_id 指向它回应的那次调用。 */
+            int mi = tool_msg_begin(c, s->id);
+            if (mi < 0) continue; /* 结果消息数达上限（不可能，槽位已封顶） */
+            if (c->tout.len > 0) tool_msg_append(c, (size_t)mi, c->tool_out);
+            /* 附一句状态说明：措辞区分「已执行」与「被拒绝」。 */
+            tool_msg_append_notice(c, (size_t)mi, s->name, ts);
         }
 
         ca_ui_line(c->cfg.ui, "");
-        turn_input = c->results;
-        /* 工具结果不在会话历史里，下一轮作为**尾随消息**追加。 */
-        user_in_history = 0;
-        if (c->results_len == 0) {
-            /* 没有结果可回灌，硬转下一轮只会让模型重复要同样的工具。 */
+
+        /* 没有任何结果可回灌，硬转下一轮只会让模型重复要同样的工具。 */
+        if (c->tool_msg_count == 0) {
             return denied ? CA_CORE_ERR_DENIED : CA_CORE_OK;
         }
+
+        /* 拼出助手那条 tool_calls 消息。拼不出来（理论上不会发生）
+         * 就退回「结束本轮」，绝不发一条没有对应调用的 tool 结果——
+         * 服务端会因缺 tool_calls 而 400，而界面上只看到「请求失败」。 */
+        if (build_replay_tool_calls(c) != 0) {
+            return denied ? CA_CORE_ERR_DENIED : CA_CORE_OK;
+        }
+        c->replay_open = 1;
+        /* 下一步是工具握手，不再有尾随用户消息。 */
+        turn_input = "";
+        user_in_history = 0;
     }
 }
