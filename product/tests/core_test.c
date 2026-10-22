@@ -178,7 +178,11 @@ static size_t g_context_bytes;
 
 static ca_permission test_perm(const char *tool, void *user) {
     (void)tool;
-    return ((int)(intptr_t)user) == 1 ? CA_PERM_ALLOW : CA_PERM_DENY;
+    int kind = (int)(intptr_t)user;
+    if (kind == 1) return CA_PERM_ALLOW;
+    /* kind == 2：策略拒绝（规则不允许，用户批准也没用） */
+    if (kind == 2) return CA_PERM_DENY_POLICY;
+    return CA_PERM_DENY;
 }
 
 static void setup(const char *system, const char *perm_answer) {
@@ -327,6 +331,33 @@ CA_TEST(core_offers_tools_to_the_model) {
     /* 参数名写错等于工具永远失败，抽两个最容易错的对一下 */
     CA_ASSERT(strstr(g_bodies[0], "\"old_string\"") != NULL);
     CA_ASSERT(strstr(g_bodies[0], "\"command\"") != NULL);
+}
+
+CA_TEST(core_policy_denial_does_not_ask_the_user) {
+    /* 策略拒绝时**不能问用户**。
+     *
+     * 真实故障现场：run_shell 的开关没开，界面却问
+     * 「run_shell 请求。允许执行？[y/N]」，用户按了 y，
+     * 结果仍然不执行，回灌还写着「用户拒绝了执行命令」——
+     * 其实用户是同意的，是规则不允许。两处都在骗人。
+     *
+     * 正确流程：展示内容 → 查策略 → 策略拒绝就到此为止，
+     * 不问；回灌与界面都要说清是「策略拒绝」。 */
+    script_reset();
+    script("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+           "\"id\":\"c1\",\"function\":{\"name\":\"write_file\","
+           "\"arguments\":\"{\\\"path\\\":\\\"p.txt\\\",\\\"content\\\":\\\"x\\\"}\"}}]}}]}\n\n"
+           "data: [DONE]\n\n");
+    g_perm_kind = 2; /* 策略拒绝 */
+    setup(NULL, "y"); /* 即便用户输入 y 也不该被问到 */
+    (void)ca_core_run_once(&g_core, "写文件");
+    CA_ASSERT(g_req_count >= 2);
+    /* 关键：界面里**没有**那句提问 */
+    CA_ASSERT(strstr(g_ui_buf, "允许执行？") == NULL);
+    /* 回灌必须说清是策略拒绝，且不能谎称用户拒绝 */
+    CA_ASSERT(strstr(g_bodies[1], "denied_by_policy") != NULL);
+    CA_ASSERT(strstr(g_bodies[1], "用户拒绝了") == NULL);
+    g_perm_kind = 0;
 }
 
 CA_TEST(core_surfaces_http_error_body) {
@@ -725,6 +756,7 @@ int main(void) {
         {"core_tool_result_tells_model_the_tool_already_ran", ca_test_run_core_tool_result_tells_model_the_tool_already_ran},
         {"core_denied_tool_result_says_it_did_not_run", ca_test_run_core_denied_tool_result_says_it_did_not_run},
         {"core_offers_tools_to_the_model", ca_test_run_core_offers_tools_to_the_model},
+        {"core_policy_denial_does_not_ask_the_user", ca_test_run_core_policy_denial_does_not_ask_the_user},
         {"core_surfaces_http_error_body", ca_test_run_core_surfaces_http_error_body},
         {"core_keeps_generic_message_when_no_body", ca_test_run_core_keeps_generic_message_when_no_body},
         {"core_rejects_unknown_tool", ca_test_run_core_rejects_unknown_tool},

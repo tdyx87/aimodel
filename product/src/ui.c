@@ -255,32 +255,34 @@ static int ui_getch(ca_ui *ui) {
     return ui->in.read_byte(ui->in.self);
 }
 
-ca_ui_decision ca_ui_confirm(ca_ui *ui, const char *tool, const char *text) {
-    if (ui == NULL) return CA_UI_DENY; /* 失败时必须保守：拒绝，而不是放行 */
-
-    /* 第一步：把待批准内容**原样**写出去。
-     * 必须在等输入之前，且绝不清屏（契约 §7 / §5.2 P5）。
+void ca_ui_show_pending(ca_ui *ui, const char *tool, const char *text) {
+    if (ui == NULL) return;
+    /* 把待批准内容**原样**写出去。必须在（可能的）提问之前，
+     * 且绝不清屏（契约 §7 / §5.2 P5）。
      *
      * TTY 下放进盒面板：内容与「这是什么操作」的标题绑在一起，
      * 用户不会把待批准的内容当成上一条消息的尾巴。
      * 非 TTY 保持裸文本（管道里不要装饰）。 */
-    if (text != NULL && text[0] != '\0') {
-        if (ui->is_tty) {
-            char title[160];
-            snprintf(title, sizeof(title), "调用工具 %s · 等待批准",
-                     tool != NULL ? tool : "");
-            ca_ui_panel(ui, title, text);
-        } else {
-            ui_puts(ui, text);
-            if (!ui->last_was_newline) ui_puts(ui, "\n");
-        }
+    if (text == NULL || text[0] == '\0') return;
+    if (ui->is_tty) {
+        char title[160];
+        snprintf(title, sizeof(title), "调用工具 %s · 等待批准",
+                 tool != NULL ? tool : "");
+        ca_ui_panel(ui, title, text);
+    } else {
+        ui_puts(ui, text);
+        if (!ui->last_was_newline) ui_puts(ui, "\n");
     }
+}
 
-    /* 第二步：给一个不会与内容混淆的分隔。 */
+ca_ui_decision ca_ui_ask(ca_ui *ui, const char *tool) {
+    if (ui == NULL) return CA_UI_DENY; /* 失败时必须保守：拒绝，而不是放行 */
+
+    /* 给一个不会与内容混淆的分隔。 */
     if (ui->is_tty) ui_puts(ui, "\n");
     ui_puts(ui, "--- ");
 
-    /* 第三步：提示。y=允许 其他一律拒绝。
+    /* 提示。y=允许 其他一律拒绝。
      * 注意这里**没有默认值**：回车不是「允许」，
      * 否则误触回车就会放行一次破坏性操作。 */
     ui_puts(ui, tool != NULL ? tool : "工具");
@@ -305,4 +307,10 @@ ca_ui_decision ca_ui_confirm(ca_ui *ui, const char *tool, const char *text) {
     ui_puts(ui, "--- \n");
     /* 任何非 y 的输入（含 EOF、错误）都拒绝。 */
     return (c < 0) ? CA_UI_ABORT : CA_UI_DENY;
+}
+
+ca_ui_decision ca_ui_confirm(ca_ui *ui, const char *tool, const char *text) {
+    if (ui == NULL) return CA_UI_DENY;
+    ca_ui_show_pending(ui, tool, text);
+    return ca_ui_ask(ui, tool);
 }

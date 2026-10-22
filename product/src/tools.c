@@ -484,10 +484,14 @@ static int arg_int(const char *json, const char *key, long long *out) {
     return 0;
 }
 
-/* 权限检查（P1）。没有回调时按默认拒绝处理。 */
-static int check_perm(ca_tool_ctx *ctx, const char *tool) {
+/* 权限检查（P1）。没有回调时按默认拒绝处理。
+ *
+ * 返回 ca_permission 而不是布尔：**拒绝原因要能区分**。
+ * 「用户拒绝」与「策略拒绝」对模型是完全不同的信息——
+ * 前者可以换个做法再来，后者重试多少次都没用。 */
+static ca_permission check_perm(ca_tool_ctx *ctx, const char *tool) {
     if (ctx == NULL || ctx->perm == NULL) return CA_PERM_DENY;
-    return ctx->perm(tool, ctx->perm_user) == CA_PERM_ALLOW ? 0 : 1;
+    return ctx->perm(tool, ctx->perm_user);
 }
 
 ca_tool_status ca_tool_read_file(ca_tool_ctx *ctx, const char *args_json) {
@@ -656,14 +660,24 @@ ca_tool_status ca_tool_write_file(ca_tool_ctx *ctx, const char *args_json) {
     }
 
     /* P1/P2：破坏性操作必须**先问权限**，拿到了同意才动文件系统。 */
-    if (check_perm(ctx, "write_file") != 0) {
+    ca_permission verdict = check_perm(ctx, "write_file");
+    if (verdict != CA_PERM_ALLOW) {
         ctx->pending_display = NULL;
         free(content);
-        /* P3：拒绝要回灌结构化结果，模型才能换个做法继续 */
-        ca_out_puts(ctx->out,
-                    "<result status=\"denied\" tool=\"write_file\">"
-                    "用户拒绝了这次写入操作。可以先说明你的意图，"
-                    "或改用其他方式。</result>");
+        /* P3：拒绝要回灌结构化结果，模型才能换个做法继续。
+         * 策略拒绝与用户拒绝要分开说：后者可以换做法再来，
+         * 前者重试多少次都没用。 */
+        if (verdict == CA_PERM_DENY_POLICY) {
+            ca_out_puts(ctx->out,
+                        "<result status=\"denied_by_policy\" tool=\"write_file\">"
+                        "策略不允许这次写入（用户即使批准也不会执行）。"
+                        "可以先说明你的意图，或改用其他方式。</result>");
+        } else {
+            ca_out_puts(ctx->out,
+                        "<result status=\"denied\" tool=\"write_file\">"
+                        "用户拒绝了这次写入操作。可以先说明你的意图，"
+                        "或改用其他方式。</result>");
+        }
         return CA_TOOL_DENIED;
     }
     ctx->pending_display = NULL;

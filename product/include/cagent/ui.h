@@ -111,6 +111,30 @@ void ca_ui_stream_end(ca_ui *ui);
  * 注意 text 是**原文**，本函数不做任何截断或省略。 */
 ca_ui_decision ca_ui_confirm(ca_ui *ui, const char *tool, const char *text);
 
+/* 只展示、不提问。
+ *
+ * 为什么要拆开：有些调用在提问之前就该知道「问了也是白问」。
+ * 典型是 run_shell 的策略开关没开——此时向用户要一个 y/N，
+ * 等于浪费一次按键，还让人以为「我明明批准了怎么还是没执行」。
+ * 于是流程变成：先展示内容 → 查策略 → 策略允许才提问。 */
+void ca_ui_show_pending(ca_ui *ui, const char *tool, const char *text);
+
+/* 只提问、不展示（内容已由 ca_ui_show_pending 展示过）。
+ * 读一个字符：y/Y 放行，其余（含回车、EOF、错误）一律拒绝。 */
+ca_ui_decision ca_ui_ask(ca_ui *ui, const char *tool);
+
+/* 只展示、不提问。
+ *
+ * 为什么要拆开：有些调用在提问之前就该知道「问了也是白问」。
+ * 典型是 run_shell 的策略开关没开——此时向用户要一个 y/N，
+ * 等于浪费一次按键，还让人以为「我明明批准了怎么还是没执行」。
+ * 于是流程变成：先展示内容 → 查策略 → 策略允许才提问。 */
+void ca_ui_show_pending(ca_ui *ui, const char *tool, const char *text);
+
+/* 只提问、不展示（内容已由 ca_ui_show_pending 展示过）。
+ * 读一个字符：y/Y 放行，其余（含回车、EOF、错误）一律拒绝。 */
+ca_ui_decision ca_ui_ask(ca_ui *ui, const char *tool);
+
 /* ---- 终端能力（平台层）---- */
 
 /* 探测当前输出是否为 TTY。实现上直接问系统，不做猜测。 */

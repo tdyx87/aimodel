@@ -122,7 +122,9 @@ typedef struct {
     size_t results_len;
 
     int rounds;             /* 已用的工具轮次 */
-    int saw_text;           /* 本轮是否有增量文本（决定要不要开流） */
+    int saw_text;
+    /* 本轮工具被**策略**拒绝（不是用户拒绝）：界面与回灌文案要区分。 */
+    int deny_by_policy;           /* 本轮是否有增量文本（决定要不要开流） */
     int saw_tool;           /* 本轮是否有工具调用 */
     char last_error[256];
 

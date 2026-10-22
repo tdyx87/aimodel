@@ -166,7 +166,10 @@ static ca_permission main_perm(const char *tool_name, void *user) {
     if (tool_name != NULL && strcmp(tool_name, "run_shell") == 0 && !g_allow_shell) {
         ca_ui_line((ca_ui *)user,
                    "（按策略拒绝执行命令：需要显式开启，设置 CAGENT_ALLOW_SHELL=1 后重试）");
-        return CA_PERM_DENY;
+        /* 返回**策略拒绝**而不是普通拒绝：上层据此不再问用户，
+         * 回灌给模型的文案也如实说明「规则不允许」，
+         * 而不是谎称「用户拒绝了」。 */
+        return CA_PERM_DENY_POLICY;
     }
     /* 走到这里说明用户在提示处已经明确同意过一次。 */
     return CA_PERM_ALLOW;

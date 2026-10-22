@@ -63,10 +63,14 @@ static int arg_int2(const char *json, const char *key, long long *out) {
     return 0;
 }
 
-/* 判断权限。P1：没有回调即拒绝。 */
-static int ask_perm(ca_tool_ctx *ctx, const char *tool) {
-    if (ctx == NULL || ctx->perm == NULL) return 1;
-    return ctx->perm(tool, ctx->perm_user) == CA_PERM_ALLOW ? 0 : 1;
+/* 判断权限。P1：没有回调即拒绝。
+ *
+ * 返回 ca_permission 而不是 0/1：**拒绝原因要能传下去**。
+ * 「用户拒绝」与「策略拒绝」对模型是不同的信息——
+ * 前者换个做法可以再来，后者重试多少次都没用。 */
+static ca_permission ask_perm(ca_tool_ctx *ctx, const char *tool) {
+    if (ctx == NULL || ctx->perm == NULL) return CA_PERM_DENY;
+    return ctx->perm(tool, ctx->perm_user);
 }
 
 /* ============================================================ search */
@@ -358,12 +362,23 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
     ctx->pending_display = pending;
 
     /* P1 + P5：先问权限，且必须在解析之前 —— 不能先执行了才问。 */
-    if (ask_perm(ctx, "run_shell") != 0) {
+    ca_permission verdict = ask_perm(ctx, "run_shell");
+    if (verdict != CA_PERM_ALLOW) {
         ctx->pending_display = NULL;
-        ca_out_puts(ctx->out,
-                    "<result status=\"denied\" tool=\"run_shell\">"
-                    "用户拒绝了执行命令。可以先说明这条命令做什么，"
-                    "或改用不执行命令的方式。</result>");
+        /* 策略拒绝 ≠ 用户拒绝：策略拒绝时用户按 y 也没用，
+         * 继续重试只是白费一次批准。 */
+        if (verdict == CA_PERM_DENY_POLICY) {
+            ca_out_puts(ctx->out,
+                        "<result status=\"denied_by_policy\" tool=\"run_shell\">"
+                        "策略不允许执行命令（用户即使批准也不会执行）。"
+                        "可以先说明这条命令做什么，"
+                        "或改用不执行命令的方式。</result>");
+        } else {
+            ca_out_puts(ctx->out,
+                        "<result status=\"denied\" tool=\"run_shell\">"
+                        "用户拒绝了执行命令。可以先说明这条命令做什么，"
+                        "或改用不执行命令的方式。</result>");
+        }
         return CA_TOOL_DENIED;
     }
     ctx->pending_display = NULL;
@@ -504,12 +519,23 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
              "将执行以下命令（原文完整展示，不折叠）：\n\n%s\n", command);
     ctx->pending_display = pending;
 
-    if (ask_perm(ctx, "run_shell") != 0) {
+    ca_permission verdict = ask_perm(ctx, "run_shell");
+    if (verdict != CA_PERM_ALLOW) {
         ctx->pending_display = NULL;
-        ca_out_puts(ctx->out,
-                    "<result status=\"denied\" tool=\"run_shell\">"
-                    "用户拒绝了执行命令。可以先说明这条命令做什么，"
-                    "或改用不执行命令的方式。</result>");
+        /* 策略拒绝 ≠ 用户拒绝：策略拒绝时用户按 y 也没用，
+         * 继续重试只是白费一次批准。 */
+        if (verdict == CA_PERM_DENY_POLICY) {
+            ca_out_puts(ctx->out,
+                        "<result status=\"denied_by_policy\" tool=\"run_shell\">"
+                        "策略不允许执行命令（用户即使批准也不会执行）。"
+                        "可以先说明这条命令做什么，"
+                        "或改用不执行命令的方式。</result>");
+        } else {
+            ca_out_puts(ctx->out,
+                        "<result status=\"denied\" tool=\"run_shell\">"
+                        "用户拒绝了执行命令。可以先说明这条命令做什么，"
+                        "或改用不执行命令的方式。</result>");
+        }
         return CA_TOOL_DENIED;
     }
     ctx->pending_display = NULL;

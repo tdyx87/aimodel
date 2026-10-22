@@ -78,7 +78,13 @@ int ca_out_try_puts(ca_out *o, const char *s);
 
 typedef enum {
     CA_PERM_ALLOW = 0,
-    CA_PERM_DENY = 1
+    CA_PERM_DENY = 1,
+    /* 策略拒绝：不是用户的决定，是**规则**不允许。
+     * 两者必须区分——
+     *   用户拒绝：用户可以改主意，模型换个做法即可；
+     *   策略拒绝：用户按 y 也没用（比如 run_shell 没开开关），
+     *   继续重试只是白费一次批准。 */
+    CA_PERM_DENY_POLICY = 2
 } ca_permission;
 
 /* 权限回调。返回 DENY 表示用户拒绝。

@@ -535,11 +535,26 @@ static ca_permission core_perm(const char *tool_name, void *user) {
         ca_ui_confirm(c->cfg.ui, tool_name, display);
         return CA_PERM_DENY;
     }
-    /* 有自定义回调时，先把待批准内容呈现出来——
-     * 否则自定义回调很容易绕过 P5。 */
-    ca_ui_decision d = ca_ui_confirm(c->cfg.ui, tool_name, display);
+    /* 顺序：**展示内容 → 查策略 → 才问用户**。
+     *
+     * 早先的顺序是「展示 → 问用户 → 查策略」，于是策略没开时
+     * 用户会被问一个注定被拒的问题：按下 y 之后仍然不执行，
+     * 界面上还写着「用户拒绝了执行命令」——其实用户同意了，
+     * 是规则不允许。两处都在骗人。
+     *
+     * 策略拒绝时**不再问**：问了也是白问，还白白消耗用户一次按键
+     * （而这个 y 会被当成「我批准过了」的错觉）。
+     * 但内容照样展示：用户有权知道代理想干什么。 */
+    ca_ui_show_pending(c->cfg.ui, tool_name, display);
+    ca_permission policy = c->cfg.perm(tool_name, c->cfg.perm_user);
+    if (policy != CA_PERM_ALLOW) {
+        c->deny_by_policy = (policy == CA_PERM_DENY_POLICY) ? 1 : 0;
+        return policy;
+    }
+    c->deny_by_policy = 0;
+    ca_ui_decision d = ca_ui_ask(c->cfg.ui, tool_name);
     if (d != CA_UI_ALLOW) return CA_PERM_DENY;
-    return c->cfg.perm(tool_name, c->cfg.perm_user);
+    return CA_PERM_ALLOW;
 }
 
 static void results_append(ca_core *c, const char *s) {
@@ -709,7 +724,10 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
                 denied = 1;
                 /* 明确告知。用户按下 n 之后必须有反馈，
                  * 否则他无法确认自己到底批准了没有。 */
-                ca_ui_warn(c->cfg.ui, "已拒绝该工具调用，未做任何改动。");
+                ca_ui_warn(c->cfg.ui,
+                           c->deny_by_policy
+                               ? "按策略拒绝该工具调用（用户即使批准也不会执行），未做任何改动。"
+                               : "已拒绝该工具调用，未做任何改动。");
             } else if (ts != CA_TOOL_OK) {
                 ca_ui_warn(c->cfg.ui, "（该工具未成功，结果见上）");
             }
