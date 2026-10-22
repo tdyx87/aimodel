@@ -443,11 +443,35 @@ jobs:
               echo '### ❌ scripts/build.sh 失败'
               echo '```'; tail -c 4000 buildsh.log; echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # 失败清单与**失败断言**都要进注解。
+            #
+            # 为什么不能只 tail 日志末尾：ctest 把每个用例的输出打在该用例
+            # 自己的位置，日志末尾只剩最后一个用例的尾巴 ——
+            # 「哪个用例、哪条断言失败」全都不在里面。
+            # 早先只 tail -12，于是 macOS 上的一次失败只留下
+            # 「133 次检查，1 次失败」这种**没有指向性**的数字，
+            # 排查者既不知道是哪个用例，也不知道哪条断言。
+            #
+            # 标注只用**纯 ASCII 的机器可读标记**：
+            #   'The following tests FAILED'  失败用例名
+            #   '[FAIL]'                       失败断言（用例名 + 文件行号 + 表达式）
+            # 不按中文 grep：Windows 上非 ASCII 会被输出成 '?'（同一个坑）。
             n=0
             while IFS= read -r line; do
-              n=$((n + 1)); [ "$n" -gt 8 ] && break
-              echo "::error title=build.sh#$n::$line"
-            done < <(tail -12 buildsh.log)
+              n=$((n + 1)); [ "$n" -gt 6 ] && break
+              echo "::error title=失败用例#$n::${line}"
+            done < <(grep -aA6 'The following tests FAILED' buildsh.log | head -6)
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 9 ] && break
+              echo "::error title=失败断言#$n::${line}"
+            done < <(grep -aA3 '\[FAIL\]' buildsh.log | head -9)
+            # 末尾仍然留一份：有些失败不在用例里（比如构建脚本本身挂了）
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 6 ] && break
+              echo "::error title=日志末尾#$n::${line}"
+            done < <(tail -6 buildsh.log)
             exit 1
           fi
           grep -E 'tests passed|Test #' buildsh.log | tail -5

@@ -564,6 +564,19 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
     int overflow = 0;
     int timed_out = 0;
     long long waited = 0;
+    /* 退出状态必须声明在**循环外**。
+     *
+     * 早先它声明在循环体内，于是「子进程在循环里被 waitpid 回收」这一条
+     * 路径上，退出码随循环一起消失；循环后又去 waitpid 一次，
+     * 而已经被回收的 pid 再 waitpid 只会得到 ECHILD（返回 -1），
+     * 局部 status 保持初值 0 → **命令失败了却报 exit_code="0"**。
+     *
+     * 这是一条**竞态**：命令是否在循环内被回收，取决于管道 EOF 与
+     * 进程退出谁先被观察到。macOS CI 上正是这条路径偶发命中，
+     * 于是 `exit 3` 偶发被报成 exit_code="0"（用例失败）。
+     * 「如实报告命令的退出码」是硬要求，不能看运气。 */
+    int status = 0;
+    int reaped = 0; /* 子进程是否已被 waitpid 回收 */
 
     for (;;) {
         struct pollfd pfd;
@@ -582,9 +595,9 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
             }
             if (n == 0) break; /* EOF */
         }
-        int status = 0;
         pid_t r = waitpid(pid, &status, WNOHANG);
         if (r == pid) {
+            reaped = 1;
             /* 进程已退出，再把管道读干净 */
             char buf[8192];
             ssize_t n;
@@ -601,6 +614,7 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
             timed_out = 1;
             kill(pid, SIGKILL);
             waitpid(pid, &status, 0);
+            reaped = 1;
             break;
         }
     }
@@ -609,9 +623,16 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
 
     int exit_code = -1;
     if (!timed_out) {
-        int status = 0;
-        if (waitpid(pid, &status, WNOHANG) == 0) { /* 已在上方回收 */ }
-        exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (!reaped) {
+            /* 走到这里说明是「管道先 EOF」那条路：写端已关闭，
+             * 进程一般已经退出，用 WNOHANG 取一次退出码。
+             * 还在跑就如实报「未知」（-1），不猜成 0。 */
+            if (waitpid(pid, &status, WNOHANG) == pid) {
+                exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+        } else {
+            exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        }
     }
 
     ca_out_printf(ctx->out,

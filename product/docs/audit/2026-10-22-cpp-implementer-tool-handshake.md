@@ -193,7 +193,7 @@ tool_calls」去解引用它们 → `core_test` 立刻段错误（`core_tells_us
 | 项 | 命令 | 结果 |
 |----|------|------|
 | Windows 构建 + ctest | `scripts/build.ps1 -Config Release -BuildDir build-curl ...` | 8/8 通过，零告警 |
-| 单测计数 | 各 `*_test.exe` | core 231 / session 1735 / llm 77 / tools 128 / ui 63 / json 74 / sse 84 / http 25 / mem 37，**全 0 失败** |
+| 单测计数 | 各 `*_test.exe` | core 239 / session 1735 / llm 77 / tools 130 / ui 63 / json 74 / sse 84 / http 25 / mem 37，**全 0 失败** |
 | POSIX | `wsl -d Ubuntu-18.04 -- bash scripts/posix_check.sh` | `ALL CLEAN` |
 | 内存 | `mem_load.py --turns 500` | 峰值 8.02 MB（基线 7.71 MB；增量来自回带缓冲） |
 | Web 冒烟 | `web_smoke.py` / `web_tool_smoke.py` | 均 PASS |

@@ -104,11 +104,12 @@
 | 5 | search 语义 | 二进制文件跳过必须**说明跳过多少个**（否则模型以为目录里没源码） |
 | 6 | **Web UI** | 全新能力：HTTP/SSE + 结构化事件 + 内嵌页面 + 四道安全闸 + 三个真 bug（SSE 截断丢事件、头部截断导致带令牌也 401、fd 复用泄露） |
 | 7 | POSIX 构建 | `ca_net_thread_ctx` 不完整类型、`pthread_cond_cond_broadcast` 拼错、`struct timeval` 缺头文件、页面超长字面量（→110 片段）、**`realpath` 隐式声明**（glibc<2.28 指针截断） |
-| 8 | **标准工具握手** | 工具结果从「尾随 user 消息」改为 `role:"tool"` + `tool_call_id`，并回带 assistant 的 `tool_calls`（根治模型重复请求同一工具）；顺手删掉 `llm.h` 里 `ca_llm_build_request_full` 的重复声明；踩到一个**真 bug**：结构体加字段而 `ca_session_export` 没同步 → 未初始化指针被解引用 → 段错误（已修 + 加不变量断言钉住） |
+| 8 | **标准工具握手** | 工具结果从「尾随 user 消息」改为 `role:"tool"` + `tool_call_id`，并回带 assistant 的 `tool_calls`（根治模型重复请求同一工具）；顺手删掉 `llm.h` 里 `ca_llm_build_request_full` 的重复声明；踩到三个**真 bug**：结构体加字段而 `ca_session_export` 没同步 → 未初始化指针被解引用 → 段错误；回带的 `tool_calls` 拼成对象而非数组（服务端 400）；回灌上限与请求体容量脱节 → 结果填满缓冲必然装不下 → 整轮失败 |
+| 9 | **run_shell 退出码竞态** | macOS CI 偶发红，根因是 POSIX 分支里退出状态声明在循环体内 + 一次多余的 waitpid → **命令失败却报 `exit_code="0"`**（失败被说成成功）；已修 + 补确定性用例；顺带把 CI 的失败注解改成能直接看出「哪个用例、哪条断言」 |
 
-**验证基线（当前）**：`ctest` 8/8；`core_test` 222 检查 / `session_test` 1735 / `llm_test` 74 /
-`tools_test` 128 / `ui_test` 63 / `json_test` 74 / `sse_test` 84 / `http_test` 25 / `mem_test` 37 —— 全 0 失败；
-`mem_load --turns 500` 峰值 8.04 MB；`posix_check.sh` ALL CLEAN；两个 Web 冒烟 PASS。
+**验证基线（当前）**：`ctest` 8/8；`core_test` 239 检查 / `session_test` 1735 / `llm_test` 77 /
+`tools_test` 130 / `ui_test` 63 / `json_test` 74 / `sse_test` 84 / `http_test` 25 / `mem_test` 37 —— 全 0 失败；
+`mem_load --turns 500` 峰值 8.0x MB；`posix_check.sh` ALL CLEAN；两个 Web 冒烟 PASS。
 
 ---
 
@@ -121,6 +122,7 @@
 | 中 | US-8 非 OpenAI 兼容格式 | 未做 |
 | 中 | 性能实测 | US-1 <500 ms / US-2 首字 <2 s 无数据 |
 | 中 | ASAN/UBSAN 构建 | 无 |
+| 中 | POSIX `run_shell` 收尾读循环可能阻塞 | 子进程已退出、但**后台进程仍持有管道写端**时，收尾的读循环会等后台进程结束；工具的硬超时管不到收尾阶段（本轮修退出码竞态时顺带发现，未修） |
 | 低 | Web 令牌过期/一次性化 | 当前进程内固定，重启即换（security Low 项） |
 | 低 | SSE 发送并行化 | 现在串行；32 个坏客户端最坏拖住代理约 64 s |
 | 低 | Web 模式 `/list` `/resume` | 只支持 `/new` `/exit` |

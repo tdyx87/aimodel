@@ -623,6 +623,46 @@ CA_TEST(run_shell_kills_command_on_timeout) {
     ca_ws_free(ws);
 }
 
+CA_TEST(run_shell_reports_exit_code_reliably) {
+    /* 退出码必须**如实报告**：命令失败就是失败，不能报 0。
+     *
+     * 真实故障（macOS CI 上偶发红）：POSIX 实现里退出状态声明在循环体内，
+     * 而「子进程在循环里被 waitpid 回收」与「管道先 EOF」是两条不同的路径。
+     * 命中前者时，循环后的 waitpid 对已回收的 pid 只得到 ECHILD，
+     * 退出码被报成 0 —— **命令失败了却报 exit_code="0"**。
+     *
+     * 怎么稳定命中那条路径：让**后台进程继承 stdout**，
+     * 管道于是不会先 EOF，循环里的 poll 会先超时，
+     * 而此时主进程已经退出 → 被循环内的 waitpid 回收。
+     * 修复前这条路径必然报出 exit_code="0"（确定性复现，不是靠运气）。
+     *
+     * 平台差异只允许出现在**测试的夹具命令**里（业务代码不许有）。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+#if defined(_WIN32)
+    /* cmd.exe：后台 ping 继承 stdout（**不要**重定向，否则管道会提前 EOF，
+     * 就回到「先 EOF」那条路径，测不到目标分支）。 */
+    const char *cmd = "ping -n 2 127.0.0.1 & exit 3";
+#else
+    /* sh：后台 sleep 继承 stdout，管道因此不会先 EOF。 */
+    const char *cmd = "sleep 1 & exit 3";
+#endif
+    char args[128];
+    snprintf(args, sizeof(args), "{\"command\":\"%s\"}", cmd);
+    ca_out_init(ctx.out, g_result, sizeof(g_result));
+    (void)ca_tool_run_shell(&ctx, args);
+    /* 报出来的必须是 3。若报成 0，就是「失败被说成成功」。 */
+    CA_ASSERT(strstr(g_result, "exit_code=\"3\"") != NULL);
+    if (strstr(g_result, "exit_code=\"3\"") == NULL) {
+        /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，
+         * 而零告警是 CI 硬门禁。中文一律作为参数传。 */
+        printf("    %s: %s\n", "actual output", g_result);
+    }
+    ca_ws_free(ws);
+}
+
 CA_TEST(run_shell_rejects_empty_command) {
     ca_workspace *ws = make_ws();
     CA_ASSERT(ws != NULL);
@@ -873,6 +913,7 @@ int main(void) {
         {"run_shell_shows_full_command_before_approval", ca_test_run_run_shell_shows_full_command_before_approval},
         {"run_shell_executes_and_reports_output", ca_test_run_run_shell_executes_and_reports_output},
         {"run_shell_reports_failure_exit_code", ca_test_run_run_shell_reports_failure_exit_code},
+        {"run_shell_reports_exit_code_reliably", ca_test_run_run_shell_reports_exit_code_reliably},
         {"run_shell_kills_command_on_timeout", ca_test_run_run_shell_kills_command_on_timeout},
         {"run_shell_rejects_empty_command", ca_test_run_run_shell_rejects_empty_command},
         {"edit_preview_reports_impact_without_modifying", ca_test_run_edit_preview_reports_impact_without_modifying},
