@@ -1,5 +1,7 @@
 # HANDOFF — cagent 终端/网页代理（2026-10-22）
 
+> 位于**变层**（product/）：内容是具体产品的，不能放到不变层（根目录 AGENTS.md / .role-system/）。
+
 > 交接文档。新会话先读这一份，再按需读 `product/docs/design/contract.md`。
 > 状态：**功能可用**，CI 三平台绿（`4c1444c`），工作树干净。
 
