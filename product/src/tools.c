@@ -20,6 +20,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if !defined(_WIN32)
+/* realpath 必须**自己声明**。
+ *
+ * CMakeLists 已经声明过立场：「关掉编译器扩展后 -std=c99 是真的，
+ * 用 POSIX 就得自己声明依赖」。而 realpath 正好是这条立场的检验：
+ * glibc < 2.28（Ubuntu 18.04 / RHEL 7 / CentOS 7）里它被
+ * __USE_XOPEN_EXTENDED 挡着，只定义 _POSIX_C_SOURCE=200809L **不够**，
+ * realpath 不会被声明 → 隐式声明（返回 int）把 64 位指针截断。
+ *
+ * CI 用的是新 glibc，那里看不出来；旧发行版上是实打实的未定义行为。
+ * 重复声明一个与 <stdlib.h> 完全一致的原型是合法的 C。
+ */
+char *realpath(const char *restrict, char *restrict);
+#endif
 #if !defined(_WIN32)
 #  include <limits.h>
 /* realpath() 的目标缓冲区必须至少是 PATH_MAX。

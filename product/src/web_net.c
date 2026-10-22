@@ -6,6 +6,17 @@
 #include <string.h>
 #include <time.h>
 
+/* 线程上下文：两个平台共用。
+ *
+ * 早先它被定义在 Windows 分支里，而 POSIX 分支在**函数内部**又定义了一份
+ * ——于是 POSIX 的 ca_net_thread_start 引用到的是「不完整类型」，
+ * GCC 直接编译失败（Windows 分支正常，本地测不出来，只有 CI 能发现）。
+ * 教训：平台差异收拢不等于可以让共用类型散在分支里。 */
+struct ca_net_thread_ctx {
+    ca_net_thread_fn fn;
+    void *arg;
+};
+
 #if defined(_WIN32)
 
 #  define _CRT_SECURE_NO_WARNINGS 1
@@ -22,11 +33,6 @@ typedef SOCKET ca_socket_t;
 
 typedef CRITICAL_SECTION ca_mutex_impl;
 typedef CONDITION_VARIABLE ca_cond_impl;
-
-struct ca_net_thread_ctx {
-    ca_net_thread_fn fn;
-    void *arg;
-};
 
 static DWORD WINAPI win_thread_proc(LPVOID p) {
     struct ca_net_thread_ctx *ctx = (struct ca_net_thread_ctx *)p;
@@ -215,6 +221,7 @@ int ca_net_random(void *buf, size_t n) {
 #  include <pthread.h>
 #  include <stdlib.h>
 #  include <sys/socket.h>
+#  include <sys/time.h>  /* struct timeval（SO_SNDTIMEO） */
 #  include <unistd.h>
 
 typedef int ca_socket_t;
@@ -296,10 +303,7 @@ int ca_net_local_port(int fd) {
 }
 
 static void *posix_thread_proc(void *p) {
-    struct ca_net_thread_ctx {
-        ca_net_thread_fn fn;
-        void *arg;
-    } *ctx = (struct ca_net_thread_ctx *)p;
+    struct ca_net_thread_ctx *ctx = (struct ca_net_thread_ctx *)p;
     ca_net_thread_fn fn = ctx->fn;
     void *arg = ctx->arg;
     free(ctx);
@@ -382,7 +386,7 @@ int ca_net_cond_wait(ca_net_cond *c, ca_net_mutex *m, int timeout_ms) {
 }
 
 void ca_net_cond_signal(ca_net_cond *c) { pthread_cond_signal((pthread_cond_t *)c->impl); }
-void ca_net_cond_broadcast(ca_net_cond *c) { pthread_cond_cond_broadcast((pthread_cond_t *)c->impl); }
+void ca_net_cond_broadcast(ca_net_cond *c) { pthread_cond_broadcast((pthread_cond_t *)c->impl); }
 
 int ca_net_random(void *buf, size_t n) {
     /* /dev/urandom：POSIX 上的加密级随机源。

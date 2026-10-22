@@ -41,6 +41,18 @@ cmake -S . -B build && cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
+POSIX 侧本地校验（WSL 也可，一分钟出结果）：
+
+```bash
+bash scripts/posix_check.sh
+```
+
+> **为什么必须有这一条**：CI 的 ubuntu/macos 用新 glibc，
+> 老发行版（Ubuntu 18.04 / RHEL 7，glibc < 2.28）的头文件声明面更窄。
+> 实测 `realpath` 在 glibc 2.27 上即使定义了 `_POSIX_C_SOURCE=200809L`
+> 也不被声明 → 隐式声明返回 int → 64 位指针截断（未定义行为）。
+> CI 全绿不等于老机器上安全。
+
 ## 2. 配置（环境变量）
 
 | 变量 | 必填 | 说明 |

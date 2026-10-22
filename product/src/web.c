@@ -38,8 +38,10 @@
 #define CA_WEB_QUEUE 32
 #define CA_WEB_MSG_MAX 8192
 
-/* 页面（内嵌，避免额外文件依赖） */
-const char *ca_web_page_html(void);
+/* 页面（内嵌，避免额外文件依赖）。
+ * 以**片段数组**给出：单��字符串字面量超过 4095 字符会触发
+ * -Woverlength-strings（ISO C99 只要求支持到 4095），CI 零告警门禁会红。 */
+const char *const *ca_web_page_chunks(size_t *count);
 
 struct ca_web {
     int listen_fd;
@@ -578,8 +580,26 @@ static void conn_thread(void *p) {
 
     /* 路由 */
     if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/") == 0) {
-        const char *html = ca_web_page_html();
-        http_send(fd, "200 OK", "text/html; charset=utf-8", html, strlen(html), 0);
+        /* 页面按片段发送：长度不超单个字符串字面量的限制。 */
+        size_t nchunks = 0;
+        const char *const *chunks = ca_web_page_chunks(&nchunks);
+        size_t total = 0;
+        for (size_t i = 0; i < nchunks; i++) total += strlen(chunks[i]);
+        char head[256];
+        int hn = snprintf(head, sizeof(head),
+                          "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: text/html; charset=utf-8\r\n"
+                          "Content-Length: %lu\r\n"
+                          "Cache-Control: no-store\r\n"
+                          "X-Content-Type-Options: nosniff\r\n"
+                          "Connection: close\r\n\r\n",
+                          (unsigned long)total);
+        if (hn > 0 && (size_t)hn < sizeof(head)) {
+            (void)ca_net_send(fd, head, (size_t)hn);
+            for (size_t i = 0; i < nchunks; i++) {
+                (void)ca_net_send(fd, chunks[i], strlen(chunks[i]));
+            }
+        }
     } else if (strcmp(req.method, "GET") == 0 &&
                strcmp(req.path, "/api/events") == 0) {
         if (!host_ok(w, &req) || !token_ok(w, &req)) {
