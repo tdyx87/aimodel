@@ -444,6 +444,26 @@ const char *ca_tool_pending_display(const ca_tool_ctx *ctx, const char *tool_nam
 
 /* ============================================================ 工具 */
 
+/* ---- UTF-8 路径的文件打开（见 tools.h 的说明）---- */
+FILE *ca_tool_fopen(const char *path, const char *mode) {
+    if (path == NULL || mode == NULL) return NULL;
+#if defined(_WIN32)
+    WCHAR wpath[CA_PATH_MAX * 2];
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath,
+                                   (int)(sizeof(wpath) / sizeof(wpath[0])));
+    if (wlen <= 0) return NULL;
+    WCHAR wmode[16];
+    size_t i = 0;
+    for (; mode[i] != '\0' && i + 1 < sizeof(wmode) / sizeof(wmode[0]); i++) {
+        wmode[i] = (WCHAR)(unsigned char)mode[i];
+    }
+    wmode[i] = L'\0';
+    return _wfopen(wpath, wmode);
+#else
+    return fopen(path, mode);
+#endif
+}
+
 /* 从参数 JSON 里取字符串字段。找不到时 out 置空。 */
 static int arg_string(const char *json, const char *key, char *out, size_t cap) {
     out[0] = '\0';
@@ -497,7 +517,7 @@ ca_tool_status ca_tool_read_file(ca_tool_ctx *ctx, const char *args_json) {
         return CA_TOOL_ERR_ARGS;
     }
 
-    FILE *f = fopen(resolved, "rb");
+    FILE *f = ca_tool_fopen(resolved, "rb");
     if (f == NULL) {
         ca_out_printf(ctx->out, "<result error=\"%s\" path=\"%s\"></result>",
                       "找不到该文件", path_in);
@@ -659,7 +679,7 @@ ca_tool_status ca_tool_write_file(ca_tool_ctx *ctx, const char *args_json) {
         return CA_TOOL_ERR_PATH;
     }
 
-    FILE *f = fopen(resolved, "wb");
+    FILE *f = ca_tool_fopen(resolved, "wb");
     if (f == NULL) {
         free(content);
         ca_out_printf(ctx->out, "<result status=\"error\" error=\"无法写入 %s\">"
@@ -707,21 +727,38 @@ ca_tool_status ca_tool_list_dir(ca_tool_ctx *ctx, const char *args_json) {
     }
 
 #if defined(_WIN32)
+    /* 用**宽字符** API 再转成 UTF-8 输出。
+     *
+     * 早先用的是 FindFirstFileA：它返回的是**系统 ANSI 代码页**的字节
+     * （简体中文机器上是 GBK），而本程序其它地方一律用 UTF-8，
+     * 于是中文文件名在界面里就是乱码（实测：「新建文本文档.txt」变成乱码）。
+     * 名字是给人看的，必须按 UTF-8 输出。 */
     char pattern[CA_PATH_MAX];
     snprintf(pattern, sizeof(pattern), "%s\\*", resolved);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
+    WCHAR wpattern[CA_PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, pattern, -1, wpattern,
+                            (int)(sizeof(wpattern) / sizeof(wpattern[0]))) == 0) {
+        ca_out_printf(ctx->out, "<result error=\"无法列出 %s\"></result>\n", path_in);
+        return CA_TOOL_ERR_NOTFOUND;
+    }
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wpattern, &fd);
     if (h == INVALID_HANDLE_VALUE) {
         ca_out_printf(ctx->out, "<result error=\"无法列出 %s\"></result>\n", path_in);
         return CA_TOOL_ERR_NOTFOUND;
     }
     ca_out_printf(ctx->out, "<result path=\"%s\" kind=\"dir\">\n", path_in);
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        char name[CA_PATH_MAX];
+        if (WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name,
+                                (int)sizeof(name), NULL, NULL) == 0) {
+            continue; /* 名字转不出来就跳过这一项，不输出半个名字 */
+        }
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
         ca_out_printf(ctx->out, "%s %s\n",
                       (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "[dir] " : "      ",
-                      fd.cFileName);
-    } while (FindNextFileA(h, &fd));
+                      name);
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 #else
     DIR *d = opendir(resolved);

@@ -37,7 +37,7 @@
 static int write_atomic(const char *path, const char *data, size_t len) {
     char tmp[1200];
     snprintf(tmp, sizeof(tmp), "%s.cagent_tmp", path);
-    FILE *f = fopen(tmp, "wb");
+    FILE *f = ca_tool_fopen(tmp, "wb");
     if (f == NULL) return -1;
     size_t wrote = fwrite(data, 1, len, f);
     int ok = (wrote == len);
@@ -113,7 +113,7 @@ static int arg_bool(const char *json, const char *key, int *out) {
 
 /* 读整个文件。返回 NULL 表示不存在或超限。 */
 static char *read_whole(const char *path, size_t *len_out) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = ca_tool_fopen(path, "rb");
     if (f == NULL) return NULL;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
     long size = ftell(f);

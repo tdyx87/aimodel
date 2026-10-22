@@ -259,10 +259,21 @@ ca_ui_decision ca_ui_confirm(ca_ui *ui, const char *tool, const char *text) {
     if (ui == NULL) return CA_UI_DENY; /* 失败时必须保守：拒绝，而不是放行 */
 
     /* 第一步：把待批准内容**原样**写出去。
-     * 必须在等输入之前，且绝不清屏（契约 §7 / §5.2 P5）。 */
+     * 必须在等输入之前，且绝不清屏（契约 §7 / §5.2 P5）。
+     *
+     * TTY 下放进盒面板：内容与「这是什么操作」的标题绑在一起，
+     * 用户不会把待批准的内容当成上一条消息的尾巴。
+     * 非 TTY 保持裸文本（管道里不要装饰）。 */
     if (text != NULL && text[0] != '\0') {
-        ui_puts(ui, text);
-        if (!ui->last_was_newline) ui_puts(ui, "\n");
+        if (ui->is_tty) {
+            char title[160];
+            snprintf(title, sizeof(title), "调用工具 %s · 等待批准",
+                     tool != NULL ? tool : "");
+            ca_ui_panel(ui, title, text);
+        } else {
+            ui_puts(ui, text);
+            if (!ui->last_was_newline) ui_puts(ui, "\n");
+        }
     }
 
     /* 第二步：给一个不会与内容混淆的分隔。 */

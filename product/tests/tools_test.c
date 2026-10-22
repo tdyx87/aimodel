@@ -99,6 +99,25 @@ static const char *make_ws_dir(void) {
     }
     for (int i = 1; i <= 200; i++) fprintf(f, "line %d\n", i);
     fclose(f);
+    /* 一个**中文名**文件：Windows 上早先的 list_dir 用 ANSI API 取名，
+     * 返回的是系统代码页字节，于是这个名字在结果里是乱码。
+     * 没有这个 fixture 就没有东西可断言。 */
+    {
+        /* 中文名文件必须用**宽字符** API 创建：fopen 走系统 ANSI 代码页，
+         * 用 UTF-8 字节去 fopen 会建出乱码名字（或直接失败），
+         * 那样的 fixture 根本测不到「列举时按 UTF-8 输出」这件事。 */
+        char cfile[2048];
+        snprintf(cfile, sizeof(cfile),
+                 "%s%c\xe6\xb5\x8b\xe8\xaf\x95\xe6\x96\x87\xe4\xbb\xb6.txt",
+                 dir, CA_TEST_SEP);
+        /* 用产品自己的 ca_tool_fopen：Windows 上它把 UTF-8 路径转成 UTF-16，
+         * 否则 fopen 走系统 ANSI 代码页，建出来的根本不是同一个名字。 */
+        FILE *cf = ca_tool_fopen(cfile, "wb");
+        if (cf != NULL) {
+            fputs("cn", cf);
+            fclose(cf);
+        }
+    }
     g_ws_dir = dir;
     return dir;
 }
@@ -354,6 +373,55 @@ CA_TEST(list_dir_works_and_marks_entries) {
     ca_tool_status st = ca_tool_list_dir(&ctx, "{\"path\":\".\"}");
     CA_ASSERT_EQ_INT(st, CA_TOOL_OK);
     CA_ASSERT(strstr(g_result, "kind=\"dir\"") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(list_dir_prints_chinese_name_as_utf8) {
+    /* 中文文件名必须以 **UTF-8** 出现在结果里。
+     *
+     * 真实故障：Windows 上用的是 FindFirstFileA，返回的是**系统 ANSI
+     * 代码页**字节（简体中文机器是 GBK），而本程序别处一律 UTF-8，
+     * 于是「新建文本文档.txt」在界面里成了乱码，模型看到的是乱码路径，
+     * 用户看到的是坏掉的列表。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, ca_perm_deny_all);
+    ca_tool_status st = ca_tool_list_dir(&ctx, "{\"path\":\".\"}");
+    CA_ASSERT_EQ_INT(st, CA_TOOL_OK);
+    /* 工作区里预置了一个中文名文件（见 make_ws） */
+    CA_ASSERT(strstr(g_result, "测试文件") != NULL);
+    ca_ws_free(ws);
+}
+
+CA_TEST(write_and_read_chinese_filename_roundtrip) {
+    /* 中文文件名必须**能写能读**。
+     *
+     * 真实故障（Windows）：路径内部是 UTF-8 字节，而 fopen 走系统 ANSI
+     * 代码页（中文机器是 GBK），于是写到「测试输出.txt」会失败或写成乱码名字，
+     * 之后又读不回来——用户说「我明明让它写文件，却说找不到」。
+     * 修法是 ca_tool_fopen 在 Windows 上转 UTF-16 再 _wfopen。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    /* 写入是破坏性操作，需要批准（这里给 allow；拒绝路径另有用例）。 */
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+    const char *path = "\xe6\xb5\x8b\xe8\xaf\x95\xe8\xbe\x93\xe5\x87\xba.txt";
+    char args[512];
+    snprintf(args, sizeof(args),
+             "{\"path\":\"%s\",\"content\":\"\xe4\xb8\xad\xe6\x96\x87\"}", path);
+    ca_tool_status st = ca_tool_write_file(&ctx, args);
+    CA_ASSERT_EQ_INT(st, CA_TOOL_OK);
+    /* 写完之后必须能列出来，且名字是 UTF-8 */
+    ca_tool_status lst = ca_tool_list_dir(&ctx, "{\"path\":\".\"}");
+    CA_ASSERT_EQ_INT(lst, CA_TOOL_OK);
+    CA_ASSERT(strstr(g_result, "\xe6\xb5\x8b\xe8\xaf\x95\xe8\xbe\x93\xe5\x87\xba.txt") != NULL);
+    /* 并且能读回来 */
+    char rargs[512];
+    snprintf(rargs, sizeof(rargs), "{\"path\":\"%s\"}", path);
+    ca_tool_status rd = ca_tool_read_file(&ctx, rargs);
+    CA_ASSERT_EQ_INT(rd, CA_TOOL_OK);
+    CA_ASSERT(strstr(g_result, "\xe4\xb8\xad\xe6\x96\x87") != NULL);
     ca_ws_free(ws);
 }
 
@@ -759,6 +827,8 @@ int main(void) {
         {"read_marks_truncation_explicitly", ca_test_run_read_marks_truncation_explicitly},
         {"read_output_carries_provenance", ca_test_run_read_output_carries_provenance},
         {"list_dir_works_and_marks_entries", ca_test_run_list_dir_works_and_marks_entries},
+        {"list_dir_prints_chinese_name_as_utf8", ca_test_run_list_dir_prints_chinese_name_as_utf8},
+        {"write_and_read_chinese_filename_roundtrip", ca_test_run_write_and_read_chinese_filename_roundtrip},
         {"list_dir_rejects_escape", ca_test_run_list_dir_rejects_escape},
         {"search_finds_literal_and_reports_counts", ca_test_run_search_finds_literal_and_reports_counts},
         {"search_result_has_no_contradictory_counts", ca_test_run_search_result_has_no_contradictory_counts},

@@ -683,17 +683,9 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
             }
             if (s->args_len == 0 || s->name[0] == '\0') continue;
 
-            {
-                /* 工具调用是「代理要动手了」的时刻，必须一眼可见。
-                 * TTY 下用盒面板；非 TTY 保持原来的一行文本（CI 友好）。 */
-                char title[128];
-                snprintf(title, sizeof(title), "调用工具 %s", s->name);
-                if (c->cfg.ui->is_tty) {
-                    ca_ui_line(c->cfg.ui, "");
-                    ca_ui_panel(c->cfg.ui, title, "");
-                } else {
-                    ca_ui_printf(c->cfg.ui, "\n[调用工具 %s]\n", s->name);
-                }
+            if (!c->cfg.ui->is_tty) {
+                /* 非 TTY 保持原来的一行文本（CI 友好）。 */
+                ca_ui_printf(c->cfg.ui, "\n[调用工具 %s]\n", s->name);
             }
             c->tout.len = 0;
             ca_tool_status ts = run_tool(c, s->name, s->args);
@@ -702,8 +694,12 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
              * 用户就是在一个黑盒里看着代理改他的文件。
              * 「代理做了什么」必须是可见的，不只是事后可查。 */
             if (c->tout.len > 0) {
+                /* 结果**放进面板**：先前是「空盒子 + 框外一段文字」，
+                 * 看起来像渲染坏了。标题写明是哪个工具的结果。 */
                 if (c->cfg.ui->is_tty) {
-                    ca_ui_note(c->cfg.ui, c->tool_out);
+                    char title[160];
+                    snprintf(title, sizeof(title), "调用工具 %s · 结果", s->name);
+                    ca_ui_panel(c->cfg.ui, title, c->tool_out);
                 } else {
                     ca_ui_line(c->cfg.ui, c->tool_out);
                 }

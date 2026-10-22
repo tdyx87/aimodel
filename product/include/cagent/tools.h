@@ -15,6 +15,7 @@
 #define CAGENT_TOOLS_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,15 @@ void ca_ws_free(ca_workspace *ws);
  */
 int ca_ws_resolve(ca_workspace *ws, const char *input, char *out, size_t cap,
                   size_t *need_len);
+
+/* ------------------------------------------------------------ 文件打开（UTF-8 路径）*/
+
+/* 打开文件。Windows 上内部一律用 UTF-8 字节串，而窄字符 API
+ * （fopen）用的是**系统 ANSI 代码页**（简体中文机器是 GBK），
+ * 于是中文路径会失败或建出乱码名字。本函数在 Windows 上把路径转成
+ * UTF-16 后用 _wfopen，POSIX 上直接 fopen。
+ * 失败返回 NULL，语义与 fopen 一致。 */
+FILE *ca_tool_fopen(const char *path, const char *mode);
 
 /* ------------------------------------------------------------ 结果输出 */
 

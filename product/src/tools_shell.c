@@ -109,7 +109,7 @@ typedef struct {
 
 /* 在单个文件里逐行找字面串。返回 -1 表示读失败（跳过该文件）。 */
 static void search_file(search_state *st, const char *abs, const char *rel) {
-    FILE *f = fopen(abs, "rb");
+    FILE *f = ca_tool_fopen(abs, "rb");
     if (f == NULL) return;
 char line[8192];
         size_t pat_len = strlen(st->pattern);
@@ -146,31 +146,44 @@ char line[8192];
 static void search_dir(search_state *st, const char *base, const char *rel, int depth) {
     if (depth > 24) return; /* 防目录炸弹 */
 #if defined(_WIN32)
+    /* 宽字符 API + UTF-8 转换：窄字符版本（FindFirstFileA）返回的是
+     * **系统 ANSI 代码页**字节（中文机器是 GBK），中文目录/文件名会变成
+     * 乱码，既搜不到也显示不对。 */
     char pattern[2048];
     snprintf(pattern, sizeof(pattern), "%s\\*", base);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
+    WCHAR wpattern[2048];
+    if (MultiByteToWideChar(CP_UTF8, 0, pattern, -1, wpattern,
+                            (int)(sizeof(wpattern) / sizeof(wpattern[0]))) == 0) {
+        return;
+    }
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wpattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return;
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        char name[2048];
+        if (WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name,
+                                (int)sizeof(name), NULL, NULL) == 0) {
+            continue;
+        }
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
         int is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         char child[2048];
-        snprintf(child, sizeof(child), "%s\\%s", base, fd.cFileName);
+        snprintf(child, sizeof(child), "%s\\%s", base, name);
         char childrel[2048];
         if (rel[0] == '\0') {
-            snprintf(childrel, sizeof(childrel), "%s", fd.cFileName);
+            snprintf(childrel, sizeof(childrel), "%s", name);
         } else {
-            snprintf(childrel, sizeof(childrel), "%s/%s", rel, fd.cFileName);
+            snprintf(childrel, sizeof(childrel), "%s/%s", rel, name);
         }
         if (is_dir) {
-            if (!should_skip_dir(fd.cFileName)) search_dir(st, child, childrel, depth + 1);
+            if (!should_skip_dir(name)) search_dir(st, child, childrel, depth + 1);
         } else {
-            if (should_skip_file(fd.cFileName)) continue;
+            if (should_skip_file(name)) continue;
             if (st->glob != NULL && st->glob[0] != '\0' &&
-                strstr(fd.cFileName, st->glob) == NULL) continue;
+                strstr(name, st->glob) == NULL) continue;
             search_file(st, child, childrel);
         }
-    } while (FindNextFileA(h, &fd));
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 #else
     DIR *d = opendir(base);
