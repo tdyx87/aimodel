@@ -269,6 +269,36 @@ jobs:
           ctest --test-dir build -C Release -V > ctest.log 2>&1
           code=$?
           tail -60 ctest.log
+          # 失败分两类，处置方式**不同**：
+          #
+          #   A. 日志里有「失败用例」→ 真实的缺陷（**而且可能是间歇性的**）
+          #      → **不重试**，立刻失败。
+          #      间歇性缺陷正是本项目要抓的东西：POSIX 的 run_shell 退出码竞态
+          #      就是这种（命令返回 3 却报 exit_code="0"）。
+          #      一律重试会把它们盖掉 —— 那样 macOS 就会长期「时红时绿」，
+          #      而没人知道到底有没有真问题。
+          #   B. 日志里**没有**失败用例、但 ctest 非零 → 进程被杀了
+          #      （runner 抖动 / 被抢占 / OOM）→ 这不是产品的问题，重试一次。
+          #
+          # B 类在 macOS arm64 runner 上偶发（runner 明确提示容量受限）。
+          # 实证：一次**只改了 markdown** 的提交（8a332e0）在 macOS 的
+          # 单元测试步骤红了，且**一条注解都没有**（步骤没走到诊断语句就死了）——
+          # 文档文件不可能让用例失败，所以那一定是基础设施抖动。
+          #
+          # 重试的结果必须**如实标注**：首跑失败的事实不能被吞掉。
+          if [ $code -ne 0 ] && ! grep -qa 'The following tests FAILED' ctest.log; then
+            echo "::warning title=单元测试首跑异常（无失败用例，疑似 runner 抖动）::ctest 退出码 $code，重试一次"
+            ctest --test-dir build -C Release -V > ctest_retry.log 2>&1
+            code2=$?
+            if [ $code2 -eq 0 ]; then
+              echo "::notice title=单元测试重试通过::首跑日志保留在 ctest.log（判定为偶发，非产品缺陷）"
+              exit 0
+            fi
+            # 重试也失败 → 用重试的日志做诊断（它才是真正的失败现场）
+            cp ctest_retry.log ctest.log
+            code=$code2
+            tail -60 ctest.log
+          fi
           if [ $code -ne 0 ]; then
             {
               echo "### ❌ 单元测试失败 (ctest 退出码 $code)"
@@ -278,6 +308,7 @@ jobs:
             # 注解**条数**有限（几十行就可能被丢弃），所以只发最关键的：
             #   1) 失败用例名（「The following tests FAILED」段落）
             #   2) 最后 3 条 [ RUN ] —— 崩溃点就在这里
+            #   3) 失败断言（[FAIL] 后面几行：文件行号 + 表达式）
             # 曾��整段塞进去，结果 verbose 日志几千行把注解配额吃光，
             # 真正要看的部分反而没发出来。
             n=0
@@ -290,6 +321,11 @@ jobs:
               n=$((n + 1)); [ "$n" -gt 3 ] && break
               echo "::error title=最后轨迹#$n::${line}"
             done < <(grep -aE '^[0-9]+: *\[ *(RUN|FAIL)' ctest.log | tail -3)
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 6 ] && break
+              echo "::error title=失败断言#$n::${line}"
+            done < <(grep -aA3 '\[FAIL\]' ctest.log | head -6)
             exit 1
           fi
 
@@ -438,6 +474,21 @@ jobs:
           set -uo pipefail
           CAGENT_BUILD_DIR=build-sh ./scripts/build.sh Release > buildsh.log 2>&1
           rc=$?
+          # 与单元测试步骤同一套判别（理由见那里）：
+          #   有失败用例 → 真实缺陷（可能间歇）→ 不重试，立刻失败；
+          #   没有失败用例、只是非零退出 → runner 抖动 → 重试一次。
+          if [ $rc -ne 0 ] && ! grep -qa 'The following tests FAILED' buildsh.log; then
+            echo "::warning title=build.sh 首跑异常（无失败用例，疑似 runner 抖动）::退出码 $rc，重试一次"
+            CAGENT_BUILD_DIR=build-sh ./scripts/build.sh Release > buildsh_retry.log 2>&1
+            rc2=$?
+            if [ $rc2 -eq 0 ]; then
+              echo "::notice title=build.sh 重试通过::首跑日志保留在 buildsh.log（判定为偶发）"
+              rc=0
+            else
+              cp buildsh_retry.log buildsh.log
+              rc=$rc2
+            fi
+          fi
           if [ $rc -ne 0 ]; then
             {
               echo '### ❌ scripts/build.sh 失败'
