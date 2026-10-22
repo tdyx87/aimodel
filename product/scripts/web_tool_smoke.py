@@ -48,7 +48,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+
+def _force_utf8_output() -> None:
+    """把 stdout/stderr 切成 UTF-8。
+
+    Windows CI 的 stdout 是 cp1252，打印中文会直接
+    UnicodeEncodeError —— 脚本挂掉，看起来像「功能坏了」，
+    其实是控制台编码问题。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - 老解释器没有 reconfigure
+            pass
+
 def main():
+    _force_utf8_output()
     exe = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("build/cagent")
     if not exe.is_file():
         print("FAIL: cagent executable not found")

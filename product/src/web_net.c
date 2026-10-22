@@ -2,6 +2,7 @@
 
 #include "web_net.h"
 
+#include <stdio.h>  /* POSIX 分支的 /dev/urandom 要用 fopen/fread/fclose */
 #include <string.h>
 #include <time.h>
 

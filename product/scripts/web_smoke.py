@@ -18,6 +18,20 @@ EXE = Path(sys.argv[1] if len(sys.argv) > 1
 PORT = int(os.environ.get("WEB_PORT", "0"))
 
 
+
+def _force_utf8_output() -> None:
+    """把 stdout/stderr 切成 UTF-8。
+
+    Windows CI 的 stdout 是 cp1252，打印中文会直接
+    UnicodeEncodeError —— 脚本挂掉，看起来像「功能坏了」，
+    其实是控制台编码问题。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - 老解释器没有 reconfigure
+            pass
+
 def wait_port(proc, timeout=20):
     """从子进程 stdout 里读出 URL（含端口与 token）。"""
     deadline = time.time() + timeout
@@ -35,6 +49,7 @@ def wait_port(proc, timeout=20):
 
 
 def main():
+    _force_utf8_output()
     work = Path(tempfile.mkdtemp(prefix="web_smoke_"))
     env = dict(os.environ)
     env["APPDATA"] = str(work / "appdata")
