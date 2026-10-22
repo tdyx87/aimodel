@@ -66,14 +66,41 @@ if (!timed_out) {
 **所以退出码对不对，取决于「管道 EOF」与「进程退出」谁先被观察到**——
 一条纯时序竞态。macOS 上的时序恰好会偶发命中路径 A。
 
-**修法**：
+### D2b. 第一次修复**不完整**（如实记录：这是本条的关键教训）
 
-- `status` 提到**循环外**，路径 A 拿到的退出码能活到循环外；
-- 用 `reaped` 标记子进程是否已被回收，**已回收的绝不再 waitpid**
-  （再 waitpid 只会得到 ECHILD 并把状态搅乱）；
-- 还没回收时用 `WNOHANG` 取一次；仍在运行就如实报 `-1`（未知），**不猜成 0**。
+第一版修法是：`status` 提到循环外 + `reaped` 标记 + 循环后 `WNOHANG` 取一次，
+取不到就报 `-1`（未知，不猜 0）。
 
-### D3. 让这条路径**确定性**可测，而不是靠运气
+**它没有真正修好。** 第二次 CI（`579fe58`）在 macOS 上又红了，
+而且这次**换了失败断言**：
+
+```
+[FAIL] run_shell_executes_and_reports_output
+  tools_test.c:587: 断言失败: strstr(g_result, "exit_code=\"0\"") != NULL
+```
+
+—— 命令**成功**了（输出里有 marker），可退出码**报不出来**。
+
+**为什么**：**管道 EOF ≠ 进程已退出**。有的 shell 会先关掉 fd 1（以及 fd 2），
+再走完退出流程（收尾、跑 trap）。于是「EOF」与「进程真的死了」之间有一个窗口，
+这个窗口里 `waitpid(WNOHANG)` 只会回答「还没退出」。
+macOS 的 `/bin/sh` 是 bash，这个窗口尤其容易命中。
+
+- 第一版修法在这个窗口里报 `-1`（**退出码报不出来**）；
+- 最初版本在这个窗口里报 `0`（**失败被说成成功**）。
+
+**同一个窗口，两种症状。** 第一版只是把「谎报成功」换成了「不报」，
+并没有让退出码变对。
+
+**最终修法**：管道 EOF 之后，**有界地等**子进程真正退出（最多 200 ms，
+每次 1 ms）再取退出码。正常情况下进程在微秒级退出，立刻拿到真实退出码；
+万一它真的赖着不走，就如实报「未知」(-1)，不猜。
+
+> 教训：**「不猜」不等于「对」**。把一个错的值换成一个诚实的未知值，
+> 确实比谎报好，但缺陷还在——而且症状换了样，更难认出来。
+> 修 bug 要问的是「正确的值是什么、怎么拿到它」，不是「怎么让它别错」。
+
+### D3. 让这两条路径**确定性**可测，而不是靠运气
 
 新用例 `run_shell_reports_exit_code_reliably` 不用 `exit 3`（它退出得太快，
 总是走路径 B），而是让**后台进程继承 stdout**：
@@ -84,10 +111,23 @@ cmd /c 'ping -n 2 127.0.0.1 & exit 3'
 ```
 
 这样 poll 必然先超时、子进程必然在循环内被回收 → **必然命中路径 A**。
-修复前该用例**确定性失败**（报 `exit_code="0"`），修复后通过。
 
-> 已实测：同一份测试代码，修复前的实现报 `exit_code="0"`（失败），
-> 修复后报 `exit_code="3"`（通过）。Linux 上可复现，无需等到 macOS。
+新用例 `run_shell_reports_exit_code_after_stdout_closed_early` 则精确制造
+D2b 的窗口：
+
+```
+sh -c 'exec 1>&- 2>&-; sleep 0.05; exit 3'   # 写端立刻关闭（EOF），进程 50 ms 后才死
+```
+
+**同一个测试文件在 Linux 上就能复现两个缺陷，不必等 macOS 偶发。**
+
+> 已实测（A/B，同一份测试代码）：
+>
+> | 实现 | 对 `exit 3` 报什么 | 用例结果 |
+> |------|------------------|---------|
+> | 最初版本（status 在循环体内 + 多余 waitpid） | `exit_code="0"` | **失败（失败被说成成功）** |
+> | 第一版修复（status 提到循环外 + 单次 WNOHANG） | `exit_code="-1"` | 失败（退出码报不出来） |
+> | 最终版本（有界等待进程真正退出） | `exit_code="3"` | **通过** |
 
 ### D4. 顺带改进 CI 的诊断通道（否则下次还得猜）
 
@@ -105,9 +145,14 @@ cmd /c 'ping -n 2 127.0.0.1 & exit 3'
 
 | 文件 | 改动 |
 |------|------|
-| `src/tools_shell.c` | POSIX 分支：`status` 提到循环外 + `reaped` 标记 + 退出码如实计算（已回收的不再 waitpid；仍在跑报 -1） |
-| `tests/tools_test.c` | 新增 `run_shell_reports_exit_code_reliably`（确定性复现目标分支；已登记到用例表） |
-| `.github/workflows/cagent.yml` | step 13 的失败注解改为 grep `The following tests FAILED` / `[FAIL]`，失败用例与断言直接可见 |
+| `src/tools_shell.c` | POSIX 分支：`status` 提到循环外 + `reaped` 标记；**管道 EOF 之后有界等待子进程真正退出**（≤200 ms）再取退出码；已回收的不再 waitpid |
+| `tests/tools_test.c` | 新增 `run_shell_reports_exit_code_reliably`（命中「循环内被回收」那条路径）与 `run_shell_reports_exit_code_after_stdout_closed_early`（命中「EOF 先于退出」那条路径）；均已登记到用例表 |
+| `.github/workflows/cagent.yml` | step 13 的失败注解改为 grep `The following tests FAILED` / `[FAIL]`，失败用例与断言直接可见；单元测试步骤与 build.sh 步骤区分「真实缺陷」与「runner 抖动」，只对后者重试 |
+
+> **CI 诊断的改动直接决定了本条能不能查清**：第一次 macOS 失败只留下
+> 「133 次检查，1 次失败」这种没有指向性的数字；加了 `[FAIL]` 注解之后，
+> 第二次失败立刻指出了「哪个用例、哪条断言、哪个文件第几行」，
+> 于是 D2b 那个「第一版修复不完整」的问题当天就查清了。
 
 ## 4. 术语与实现边界（如实记录）
 
@@ -133,7 +178,7 @@ cmd /c 'ping -n 2 127.0.0.1 & exit 3'
 |----|------|------|
 | Windows 构建 + ctest | `scripts/build.ps1 -Config Release -BuildDir build-curl ...` | 8/8 通过，**零告警** |
 | POSIX 语法 | `wsl -d Ubuntu-18.04 -- bash scripts/posix_check.sh` | `ALL CLEAN` |
-| Linux 全量测试 | WSL + gcc 直接编译（WSL 的 CMake 3.10 < 项目要求的 3.15） | 修复前：新用例**确定性失败**（`exit_code="0"`）；修复后：全部通过 |
-| 单测计数（Windows） | 各 `*_test.exe` | core 239 / session 1735 / llm 77 / tools 130 / ui 63 / json 74 / sse 84 / http 25 / mem 37，**全 0 失败** |
+| Linux 全量测试 | WSL + gcc 直接编译（WSL 的 CMake 3.10 < 项目要求的 3.15） | 修复前：新用例**确定性失败**；修复后：全部通过（见 D3 的 A/B 表） |
+| 单测计数（Windows） | 各 `*_test.exe` | core 239 / session 1735 / llm 77 / tools 132 / ui 63 / json 74 / sse 84 / http 25 / mem 37，**全 0 失败** |
 | 内存 | `mem_load.py --turns 500` | 峰值 8.0x MB（预算 100 MB） |
 | Web 冒烟 | `web_smoke.py` / `web_tool_smoke.py` | 均 PASS |

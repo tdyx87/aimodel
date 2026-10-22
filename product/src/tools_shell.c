@@ -39,6 +39,7 @@
 #  include <poll.h>
 #  include <signal.h>
 #  include <sys/wait.h>
+#  include <time.h>  /* nanosleep：等子进程真正退出（见退出码那段） */
 #  include <unistd.h>
 #endif
 
@@ -623,15 +624,37 @@ ca_tool_status ca_tool_run_shell(ca_tool_ctx *ctx, const char *args_json) {
 
     int exit_code = -1;
     if (!timed_out) {
-        if (!reaped) {
-            /* 走到这里说明是「管道先 EOF」那条路：写端已关闭，
-             * 进程一般已经退出，用 WNOHANG 取一次退出码。
-             * 还在跑就如实报「未知」（-1），不猜成 0。 */
-            if (waitpid(pid, &status, WNOHANG) == pid) {
-                exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-            }
-        } else {
+        if (reaped) {
             exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        } else {
+            /* 走到这里说明是「管道先 EOF」那条路。
+             *
+             * **EOF 不等于进程已退出**：写端关闭与进程真正死掉之间
+             * 有一个小窗口 —— 有的 shell 会先关掉 fd 1，再走完退出流程
+             * （收尾、跑 trap）。macOS 的 /bin/sh 是 bash，这个窗口更明显。
+             *
+             * 早先这里只 WNOHANG 取一次：窗口内就取不到退出码，
+             * 于是退出码退化成「未知」（-1），命令明明返回 0 却报不出来。
+             * （更早的版本把 status 留在初值 0，于是同一个窗口里
+             *  「返回 3」被报成「0」——失败被说成成功。）
+             *
+             * 现在**有界地等**一小会儿：正常情况下进程在微秒级退出，
+             * 立刻就能拿到真实退出码；万一它真的赖着不走，
+             * 就如实报「未知」（-1），不猜。
+             *
+             * 上界 200 ms：超时就放弃，不能让工具挂住。 */
+            for (int i = 0; i < 200; i++) {
+                pid_t r = waitpid(pid, &status, WNOHANG);
+                if (r == pid) {
+                    exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+                    break;
+                }
+                if (r < 0) break; /* 出错了，别再等 */
+                struct timespec ts;
+                ts.tv_sec = 0;
+                ts.tv_nsec = 1000L * 1000L; /* 1 ms */
+                nanosleep(&ts, NULL);
+            }
         }
     }
 

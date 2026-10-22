@@ -623,6 +623,53 @@ CA_TEST(run_shell_kills_command_on_timeout) {
     ca_ws_free(ws);
 }
 
+CA_TEST(run_shell_reports_exit_code_after_stdout_closed_early) {
+    /* 管道 EOF **不等于**进程已退出。
+     *
+     * 有的 shell 会先关掉 fd 1（以及 fd 2），再走完退出流程。
+     * 于是「管道 EOF」与「进程真的死了」之间有一个窗口：
+     * 这个窗口里 waitpid 只会回答「还没退出」。
+     * macOS 的 /bin/sh 是 bash，这个窗口尤其容易命中。
+     *
+     * 早先的实现正是在这个窗口里把退出码弄错：
+     *   - 最初：status 留在初值 0 → 「返回 3」被报成「0」；
+     *     **失败被说成成功**，这是最坏的一类错。
+     *   - 中间：只 WNOHANG 取一次 → 报「未知」（-1），
+     *     命令明明返回 0，退出码却报不出来。
+     *
+     * 用 `exec 1>&- 2>&-` 精确制造这个窗口：写端立刻关闭（管道 EOF），
+     * 进程 50 ms 后才真正退出。哪个平台都能复现，不必等 macOS 偶发。 */
+    ca_workspace *ws = make_ws();
+    CA_ASSERT(ws != NULL);
+    if (ws == NULL) return;
+    ca_tool_ctx ctx = make_ctx(ws, perm_allow);
+#if defined(_WIN32)
+    /* Windows 分支用 GetExitCodeProcess 取退出码，不存在
+     * 「管道 EOF 与进程退出之间的窗口」这条 POSIX 特有的路径。
+     * 但它有自己的一条：**进程已退出、管道却还没 EOF**
+     * （后台进程仍持有写端）——收尾的读循环必须照常走到退出码。
+     * 用后台 ping 制造这个局面（ping 的输出不能重定向到 nul，
+     * 否则写端不会被它持有）。 */
+    const char *cmd = "ping -n 2 127.0.0.1 & exit 3";
+#else
+    /* sleep 用小数秒：窗口必须短于实现里 200 ms 的等待上限，
+     * 否则测的就是「超时后如实报未知」而不是「拿到真实退出码」。
+     * GNU 与 BSD 的 sleep 都支持小数秒。 */
+    const char *cmd = "exec 1>&- 2>&-; sleep 0.05; exit 3";
+#endif
+    char args[160];
+    snprintf(args, sizeof(args), "{\"command\":\"%s\"}", cmd);
+    ca_out_init(ctx.out, g_result, sizeof(g_result));
+    (void)ca_tool_run_shell(&ctx, args);
+    CA_ASSERT(strstr(g_result, "exit_code=\"3\"") != NULL);
+    if (strstr(g_result, "exit_code=\"3\"") == NULL) {
+        /* 格式串纯 ASCII：MSVC 对含中文的格式串会误报 C4474，
+         * 而零告警是 CI 硬门禁。中文一律作为参数传。 */
+        printf("    %s: %s\n", "actual output", g_result);
+    }
+    ca_ws_free(ws);
+}
+
 CA_TEST(run_shell_reports_exit_code_reliably) {
     /* 退出码必须**如实报告**：命令失败就是失败，不能报 0。
      *
@@ -913,6 +960,7 @@ int main(void) {
         {"run_shell_shows_full_command_before_approval", ca_test_run_run_shell_shows_full_command_before_approval},
         {"run_shell_executes_and_reports_output", ca_test_run_run_shell_executes_and_reports_output},
         {"run_shell_reports_failure_exit_code", ca_test_run_run_shell_reports_failure_exit_code},
+        {"run_shell_reports_exit_code_after_stdout_closed_early", ca_test_run_run_shell_reports_exit_code_after_stdout_closed_early},
         {"run_shell_reports_exit_code_reliably", ca_test_run_run_shell_reports_exit_code_reliably},
         {"run_shell_kills_command_on_timeout", ca_test_run_run_shell_kills_command_on_timeout},
         {"run_shell_rejects_empty_command", ca_test_run_run_shell_rejects_empty_command},

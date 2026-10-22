@@ -117,10 +117,10 @@
 | 6 | **Web UI** | 全新能力：HTTP/SSE + 结构化事件 + 内嵌页面 + 四道安全闸 + 三个真 bug（SSE 截断丢事件、头部截断导致带令牌也 401、fd 复用泄露） |
 | 7 | POSIX 构建 | `ca_net_thread_ctx` 不完整类型、`pthread_cond_cond_broadcast` 拼错、`struct timeval` 缺头文件、页面超长字面量（→110 片段）、**`realpath` 隐式声明**（glibc<2.28 指针截断） |
 | 8 | **标准工具握手** | 工具结果从「尾随 user 消息」改为 `role:"tool"` + `tool_call_id`，并回带 assistant 的 `tool_calls`（根治模型重复请求同一工具）；顺手删掉 `llm.h` 里 `ca_llm_build_request_full` 的重复声明；踩到三个**真 bug**：结构体加字段而 `ca_session_export` 没同步 → 未初始化指针被解引用 → 段错误；回带的 `tool_calls` 拼成对象而非数组（服务端 400）；回灌上限与请求体容量脱节 → 结果填满缓冲必然装不下 → 整轮失败 |
-| 9 | **run_shell 退出码竞态** | macOS CI 偶发红，根因是 POSIX 分支里退出状态声明在循环体内 + 一次多余的 waitpid → **命令失败却报 `exit_code="0"`**（失败被说成成功）；已修 + 补确定性用例；顺带把 CI 的失败注解改成能直接看出「哪个用例、哪条断言」 |
+| 9 | **run_shell 退出码竞态** | macOS CI 偶发红，根因是 POSIX 分支里退出状态声明在循环体内 + 一次多余的 waitpid → **命令失败却报 `exit_code="0"`**（失败被说成成功）；**修了两轮**（第一轮不完整：只把「谎报」换成「不报」，症状还换了个样）；最终改为「管道 EOF 之后有界等待子进程真正退出」；两个确定性用例在 Linux 上就能复现两条路径 |
 
 **验证基线（当前）**：`ctest` 8/8；`core_test` 239 检查 / `session_test` 1735 / `llm_test` 77 /
-`tools_test` 130 / `ui_test` 63 / `json_test` 74 / `sse_test` 84 / `http_test` 25 / `mem_test` 37 —— 全 0 失败；
+`tools_test` 132 / `ui_test` 63 / `json_test` 74 / `sse_test` 84 / `http_test` 25 / `mem_test` 37 —— 全 0 失败；
 `mem_load --turns 500` 峰值 8.0x MB；`posix_check.sh` ALL CLEAN；两个 Web 冒烟 PASS。
 
 ---
