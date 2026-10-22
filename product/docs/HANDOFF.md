@@ -3,7 +3,7 @@
 > 位于**变层**（product/）：内容是具体产品的，不能放到不变层（根目录 AGENTS.md / .role-system/）。
 
 > 交接文档。新会话先读这一份，再按需读 `product/docs/design/contract.md`。
-> 状态：**功能可用**，CI 三平台绿（`2a58245`），工作树干净。
+> 状态：**功能可用**，CI 三平台绿（`7e03e36`），工作树干净。
 >
 > **2026-10-22 更新**：完成「标准工具握手」（ADR-0006），
 > 遗留清单里优先级最高的一项已消；顺带修掉 `run_shell` 的退出码竞态。
@@ -16,7 +16,7 @@
 | 项 | 值 |
 |----|-----|
 | 仓库 | `E:\workspace\aimodel`，远端 `https://github.com/tdyx87/aimodel.git` |
-| 分支 | `feat/c-agent`（head = `2a58245`，已推送） |
+| 分支 | `feat/c-agent`（head = `7e03e36`，已推送） |
 | 不变层 | `.role-system/`（角色系统）——**本轮及上轮均零改动** |
 | 变层 | `product/`（本产品的源码、文档、审计、ADR） |
 
