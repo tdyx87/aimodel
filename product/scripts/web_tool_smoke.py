@@ -68,6 +68,9 @@ def main():
     if not exe.is_file():
         print("FAIL: cagent executable not found")
         return 1
+    # 转绝对路径：子进程用 cwd=<临时目录> 启动，POSIX 下相对程序路径
+    # 按新 cwd 解析 → 找不到可执行文件（Windows 看不见这个坑）。
+    exe = exe.resolve()
 
     srv = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()

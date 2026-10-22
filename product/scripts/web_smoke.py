@@ -15,6 +15,10 @@ from pathlib import Path
 
 EXE = Path(sys.argv[1] if len(sys.argv) > 1
            else r"E:\workspace\aimodel\product\build-curl\Release\cagent.exe")
+# **必须转成绝对路径**：子进程用 cwd=<临时目录> 启动，
+# 而 POSIX 下相对的程序路径是按**新 cwd** 解析的 → 找不到可执行文件。
+# Windows 不报（CreateProcess 按父进程 cwd 解析），所以这个 bug 在 Windows 上隐形。
+EXE = EXE.resolve()
 PORT = int(os.environ.get("WEB_PORT", "0"))
 
 

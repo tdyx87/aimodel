@@ -543,7 +543,12 @@ static void conn_thread(void *p) {
         char method[16] = {0};
         char target[512] = {0};
         if (sscanf(first_line, "%15s %511s", method, target) == 2) {
-            strncpy(req.method, method, sizeof(req.method) - 1);
+            /* 不用 strncpy：它可能截断，GCC 会报 -Wstringop-truncation，
+             * 而 CI 把告警当失败。这里显式判长度再拷贝。 */
+            size_t mlen = strlen(method);
+            if (mlen >= sizeof(req.method)) mlen = sizeof(req.method) - 1;
+            memcpy(req.method, method, mlen);
+            req.method[mlen] = '\0';
             parse_target(target, req.path, sizeof(req.path), req.query,
                          sizeof(req.query));
         }
