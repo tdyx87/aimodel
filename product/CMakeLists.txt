@@ -192,11 +192,23 @@ if (CAGENT_BUILD_TESTS)
     add_test(NAME core_test COMMAND core_test)
 endif()
 
+# ---- web：本地 Web UI（HTTP/SSE，无第三方依赖）----
+# 平台差异（socket/线程/互斥量）收在 web_net.c，
+# 协议逻辑（HTTP 解析/SSE/事件）在 web.c。
+add_library(cagent_web STATIC src/web.c src/web_net.c src/web_page.c)
+target_include_directories(cagent_web PUBLIC include)
+target_link_libraries(cagent_web PUBLIC cagent_json)
+if (WIN32)
+    # Winsock2：Windows 上的 socket 实现，需要显式链接 ws2_32.lib
+    # bcrypt：系统熵源（生成访问令牌），同样是系统 DLL
+    target_link_libraries(cagent_web PRIVATE ws2_32 bcrypt)
+endif()
+
 # ---- 可执行入口 ----
 # main 刻意薄：配置解析 + 读一行 + 交给 core。
 # 它不属于测试构建，所以放在 CAGENT_BUILD_TESTS 之外。
 add_executable(cagent src/main.c)
-target_link_libraries(cagent PRIVATE cagent_core)
+target_link_libraries(cagent PRIVATE cagent_core cagent_web)
 # 版本号注入二进制：发布检查单要求「拿到一个二进制就能说出它是哪个构建」。
 target_compile_definitions(cagent PRIVATE CAGENT_VERSION="${PROJECT_VERSION}")
 # cagent_core 是静态库，其依赖（ui/llm/tools/json/sse）以 PUBLIC 标注，

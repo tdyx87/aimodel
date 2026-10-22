@@ -73,6 +73,31 @@ typedef enum {
     CA_CORE_ERR_NOMEM
 } ca_core_status;
 
+/* ---- 结构化事件（可选回调，供 Web UI 等富客户端使用）----
+ *
+ * 终端只需要「一段文本」；浏览器需要区分「模型说的 / 工具做的 /
+ * 要你批准的」。所以 core 在关键节点发事件，而不是让上层去解析文本——
+ * 解析文本等于把界面格式变成契约，格式一改就全错。
+ *
+ * 回调在**代理线程**上被调用（不是 HTTP 线程）：
+ * 实现必须自己保证线程安全，且**不能阻塞**（会拖住代理）。 */
+typedef enum {
+    CA_CORE_EV_TEXT = 0,   /* 模型输出的一段文本（增量） */
+    CA_CORE_EV_TOOL,       /* 工具调用开始 / 结束（看 status） */
+    CA_CORE_EV_APPROVAL,   /* 请求批准（text 是待批准内容） */
+    CA_CORE_EV_ERROR,      /* 出错 */
+    CA_CORE_EV_DONE        /* 一轮结束 */
+} ca_core_event_kind;
+
+typedef struct {
+    ca_core_event_kind kind;
+    const char *text;   /* 文本（仅在回调期间有效） */
+    const char *name;   /* 工具名 */
+    const char *status; /* 状态：calling / ok / denied / denied_by_policy */
+} ca_core_event;
+
+typedef void (*ca_core_on_event)(const ca_core_event *ev, void *user);
+
 typedef struct {
     const ca_transport_ops *transport; /* 必填；注入而非硬编码，测试才跑得起来 */
     const char *api_base;             /* 必填 */
@@ -95,6 +120,10 @@ typedef struct {
      * 超出 [MIN, MAX] 会被钳制，而不是报错——一个过大的数字不该让
      * 代理拒绝启动，钳制后的实际值会通过 ca_core_context_bytes() 暴露。 */
     size_t context_bytes;
+
+    /* 可选：结构化事件回调（Web UI 用）。为 NULL 时行为完全不变。 */
+    ca_core_on_event on_event;
+    void *on_event_user;
 } ca_core_config;
 
 /* 运行期状态。全部定长，不做无界增长。 */

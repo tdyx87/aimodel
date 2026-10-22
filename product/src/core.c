@@ -153,6 +153,16 @@ static void on_event(const ca_event *ev, void *user) {
                 c->saw_text = 1;
             }
             ca_ui_stream_token(c->cfg.ui, piece);
+            /* 富客户端（Web UI）需要知道「这是模型说的」，
+             * 而不是从终端文本里猜。 */
+            if (c->cfg.on_event != NULL) {
+                ca_core_event cev;
+                cev.kind = CA_CORE_EV_TEXT;
+                cev.text = piece;
+                cev.name = NULL;
+                cev.status = NULL;
+                c->cfg.on_event(&cev, c->cfg.on_event_user);
+            }
             /* 同一段文本同时进历史。**只在这一处**记录助手输出，
              * 免得出现「显示的是 A、记下的是 B」这种两套真相。 */
             if (c->cfg.session != NULL) {
@@ -546,6 +556,14 @@ static ca_permission core_perm(const char *tool_name, void *user) {
      * （而这个 y 会被当成「我批准过了」的错觉）。
      * 但内容照样展示：用户有权知道代理想干什么。 */
     ca_ui_show_pending(c->cfg.ui, tool_name, display);
+    if (c->cfg.on_event != NULL) {
+        ca_core_event cev;
+        cev.kind = CA_CORE_EV_APPROVAL;
+        cev.text = display;
+        cev.name = tool_name;
+        cev.status = "pending";
+        c->cfg.on_event(&cev, c->cfg.on_event_user);
+    }
     ca_permission policy = c->cfg.perm(tool_name, c->cfg.perm_user);
     if (policy != CA_PERM_ALLOW) {
         c->deny_by_policy = (policy == CA_PERM_DENY_POLICY) ? 1 : 0;
@@ -667,6 +685,15 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
                 snprintf(msg, sizeof(msg), "%s%s", "错误：",
                          c->last_error[0] ? c->last_error : ca_core_status_text(st));
                 ca_ui_error(c->cfg.ui, msg);
+                if (c->cfg.on_event != NULL) {
+                    ca_core_event cev;
+                    cev.kind = CA_CORE_EV_ERROR;
+                    cev.text = c->last_error[0] ? c->last_error
+                                                : ca_core_status_text(st);
+                    cev.name = NULL;
+                    cev.status = NULL;
+                    c->cfg.on_event(&cev, c->cfg.on_event_user);
+                }
             }
             return st;
         }
@@ -675,7 +702,17 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
          * 用户以为上下文还在——「丢了会说」是本产品的差异点。 */
         core_report_session_notice(c);
 
-        if (c->slot_count == 0) return CA_CORE_OK; /* 纯文本回答，本轮结束 */
+        if (c->slot_count == 0) {
+            if (c->cfg.on_event != NULL) {
+                ca_core_event cev;
+                cev.kind = CA_CORE_EV_DONE;
+                cev.text = NULL;
+                cev.name = NULL;
+                cev.status = NULL;
+                c->cfg.on_event(&cev, c->cfg.on_event_user);
+            }
+            return CA_CORE_OK; /* 纯文本回答，本轮结束 */
+        }
 
         /* 工具轮次有硬上限 */
         if (c->rounds >= CA_CORE_MAX_TOOL_ROUNDS) {
@@ -702,6 +739,14 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
                 /* 非 TTY 保持原来的一行文本（CI 友好）。 */
                 ca_ui_printf(c->cfg.ui, "\n[调用工具 %s]\n", s->name);
             }
+            if (c->cfg.on_event != NULL) {
+                ca_core_event cev;
+                cev.kind = CA_CORE_EV_TOOL;
+                cev.text = NULL;
+                cev.name = s->name;
+                cev.status = "calling";
+                c->cfg.on_event(&cev, c->cfg.on_event_user);
+            }
             c->tout.len = 0;
             ca_tool_status ts = run_tool(c, s->name, s->args);
 
@@ -718,6 +763,16 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
                 } else {
                     ca_ui_line(c->cfg.ui, c->tool_out);
                 }
+            }
+            if (c->cfg.on_event != NULL) {
+                ca_core_event cev;
+                cev.kind = CA_CORE_EV_TOOL;
+                cev.text = (c->tout.len > 0) ? c->tool_out : NULL;
+                cev.name = s->name;
+                cev.status = (ts == CA_TOOL_OK)
+                                 ? "ok"
+                                 : ((ts == CA_TOOL_DENIED) ? "denied" : "error");
+                c->cfg.on_event(&cev, c->cfg.on_event_user);
             }
 
             if (ts == CA_TOOL_DENIED) {

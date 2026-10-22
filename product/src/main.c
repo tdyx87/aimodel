@@ -22,6 +22,7 @@
 #include "cagent/http.h"
 #include "cagent/mem.h"
 #include "cagent/tools.h"
+#include "cagent/web.h"
 
 #if !defined(_WIN32)
 #  include <signal.h>
@@ -59,6 +60,45 @@ static int g_sess_dir_ok;
 static const char *g_cfg_model_name = "";
 /* --probe：只做诊断，不进交互。 */
 static int g_want_probe;
+/* --web：本地 Web UI（与控制台共存：控制台显示同样的内容，浏览器负责交互）。 */
+static int g_want_web;
+static int g_web_port;
+static ca_web *g_web;
+
+/* core 事件 → Web 事件。
+ *
+ * 映射必须在**代理线程**里做（core 在这里发事件），
+ * ca_web_emit 内部有锁，可以安全地被别的线程调用。 */
+static void web_on_core_event(const ca_core_event *ev, void *user) {
+    ca_web *w = (ca_web *)user;
+    if (w == NULL || ev == NULL) return;
+    ca_web_event e;
+    e.text = ev->text;
+    e.name = ev->name;
+    e.status = ev->status;
+    switch (ev->kind) {
+        case CA_CORE_EV_TEXT: e.kind = CA_WEB_EV_TEXT; break;
+        case CA_CORE_EV_TOOL: e.kind = CA_WEB_EV_TOOL; break;
+        case CA_CORE_EV_APPROVAL: e.kind = CA_WEB_EV_APPROVAL; break;
+        case CA_CORE_EV_ERROR: e.kind = CA_WEB_EV_ERROR; break;
+        case CA_CORE_EV_DONE: e.kind = CA_WEB_EV_DONE; break;
+        default: e.kind = CA_WEB_EV_TEXT; break;
+    }
+    ca_web_emit(w, &e);
+}
+
+/* Web 模式的输入源：等浏览器的批准决定。
+ *
+ * 终端的批准是「按一个键」，浏览器的批准是「点一个按钮」——
+ * 对上层来说都是「读一个字符」，所以直接复用 ui 层的输入通道，
+ * core 与工具层完全不需要知道自己在跟谁打交道。 */
+static int web_read_byte(void *self) {
+    (void)self;
+    if (g_web == NULL) return -1;
+    int r = ca_web_wait_approval(g_web, 3600000);
+    if (r < 0) return -1; /* 超时：按拒绝处理（ui 层把非 y 一律当拒绝） */
+    return (r == 1) ? 'y' : 'n';
+}
 
 /* Ctrl-C 时的收尾：必须**先还原终端模式**再退出。
  *
@@ -364,6 +404,8 @@ static void print_cli_help(void) {
            "  -h, --help     显示本帮助\n"
            "  -v, --version  显示版本与传输后端\n"
            "  --probe        诊断：打印配置并做一次最小真实请求\n"
+           "  --web          启动本地 Web UI（浏览器里聊天与批准）\n"
+           "  --web-port N   指定 Web UI 端口（默认由系统分配）\n"
            "  （无选项）      进入交互会话；配置取自环境变量，见下\n"
            "\n");
     print_usage(stdout);
@@ -498,6 +540,14 @@ int main(int argc, char **argv) {
             g_want_probe = 1;
             continue;
         }
+        if (strcmp(a, "--web") == 0) {
+            g_want_web = 1;
+            continue;
+        }
+        if (strcmp(a, "--web-port") == 0 && i + 1 < argc) {
+            g_web_port = atoi(argv[++i]);
+            continue;
+        }
         fprintf(stderr, "%s%s%s\n", "未知选项：", a, "（试试 --help）");
         return 2;
     }
@@ -604,6 +654,27 @@ int main(int argc, char **argv) {
         return 3;
     }
 
+    if (g_want_web) {
+        /* 启动本地 Web UI。
+         *
+         * 安全前提（web.h 里有完整说明）：
+         *   - 只监听 127.0.0.1（绝不暴露到局域网）
+         *   - URL 带随机 token，没有 token 的请求一律 401
+         *   - run_shell 仍需显式开 CAGENT_ALLOW_SHELL=1
+         *     （「浏览器里点一下就执行命令」不该是默认状态） */
+        if (ca_web_start(&g_web, g_web_port) != 0) {
+            fprintf(stderr, "无法启动本地 Web 服务（端口被占用？）。\n");
+            ca_ui_shutdown(&ui);
+            ca_ws_free(ws);
+            return 6;
+        }
+        /* Web 模式下「按键」来自浏览器：ui 的输入源换成 web 的。 */
+        src.read_byte = web_read_byte;
+        src.self = NULL;
+        ui.in = src;
+        ui.is_tty = 0; /* 非 TTY 路径：不要 ANSI、不要进原始模式 */
+    }
+
     ca_core_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.transport = tr;
@@ -621,6 +692,10 @@ int main(int argc, char **argv) {
     /* 单次请求上限：0 表示用默认（256 KB）。core 会把它钳制到
      * [16 KB, 4 MB]，钳制后的真实值从 ca_core_context_bytes() 取。 */
     cfg.context_bytes = context_bytes;
+    if (g_web != NULL) {
+        cfg.on_event = web_on_core_event;
+        cfg.on_event_user = g_web;
+    }
 
     /* 会话（US-6）：预算传 0 → 用契约规定的历史上限。
      * 拿不到会话目录不算致命：降级为「只在内存里记得」，
@@ -675,6 +750,65 @@ int main(int argc, char **argv) {
         /* 离线模式必须在界面上**明说**，否则用户会以为
          * 模型真的这样回答 —— 那是把假的当真。 */
         ca_ui_line(&ui, "离线自检模式：不发起任何网络请求，回复是预设内容。");
+    }
+
+    if (g_web != NULL) {
+        /* Web 模式：控制台显示同样的内容，**输入来自浏览器**。
+         * 控制台只做旁观者（外加 Ctrl-C 退出）——
+         * 两个输入源同时可用会让「谁在说话」变得含糊。 */
+        char url[256];
+        snprintf(url, sizeof(url), "%s", ca_web_url(g_web));
+        ca_ui_heading(&ui, "cagent —— Web UI 已启动");
+        ca_ui_kv(&ui, "浏览器打开", url);
+        ca_ui_kv(&ui, "工作区", cwd);
+        ca_ui_kv(&ui, "模型", g_cfg_model_name);
+        ca_ui_note(&ui,
+                   "在浏览器里聊天与批准；本窗口显示同样的内容，Ctrl-C 退出。");
+        ca_ui_note(&ui,
+                   "提示：URL 里的令牌是访问凭证，不要转发给别人。");
+        {
+            ca_web_event info;
+            info.kind = CA_WEB_EV_INFO;
+            info.text = cwd;
+            info.name = g_cfg_model_name;
+            info.status = ca_transport_name();
+            ca_web_emit(g_web, &info);
+        }
+        for (;;) {
+            char msg[8192];
+            int r = ca_web_pop_user(g_web, msg, sizeof(msg), 500);
+            if (r < 0) break;  /* 服务已停止 */
+            if (r == 0) continue; /* 超时：继续等 */
+            if (msg[0] == '/') {
+                if (strcmp(msg, "/exit") == 0 || strcmp(msg, "/quit") == 0) break;
+                if (strcmp(msg, "/new") == 0) {
+                    /* 只清内存，不动磁盘：开启新会话不该顺手删掉旧会话。 */
+                    save_session_quietly();
+                    g_session.count = 0;
+                    g_session.used = 0;
+                    g_session.buf[0] = '\0';
+                    g_session.id[0] = '\0';
+                    ca_ui_line(&ui, "已开始新会话。");
+                    continue;
+                }
+                ca_ui_line(&ui, "（Web 模式目前支持 /new 与 /exit）");
+                continue;
+            }
+            (void)ca_core_run_once(&g_core, msg);
+            save_session_quietly();
+        }
+        save_session_quietly();
+        if (g_sess_dir_ok && g_session.id[0] != '\0') {
+            ca_ui_printf(&ui, "本次会话已保存：%s（用 /resume %s 继续）\n",
+                         g_session.id, g_session.id);
+        }
+        ca_session_free(&g_session);
+        ca_core_free(&g_core);
+        if (tr->cleanup != NULL) tr->cleanup();
+        ca_ui_shutdown(&ui);
+        ca_ws_free(ws);
+        ca_web_stop(g_web);
+        return 0;
     }
 
     for (;;) {

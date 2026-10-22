@@ -485,6 +485,48 @@ jobs:
           fi
           tail -14 memload.log
 
+      # Web UI 冒烟：页面可取、无令牌 401、带令牌可用、批准 → 工具真的落盘。
+      # 本地脚本化 SSE 服务（不依赖真实服务商），所以这条是**确定性**的。
+      - name: Web UI 冒烟（本地服务，不联网）
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          EXE=""
+          for cand in build/Release/cagent.exe build/cagent.exe build/cagent; do
+            if [ -f "$cand" ]; then EXE="$cand"; break; fi
+          done
+          if [ -z "$EXE" ]; then
+            echo "::error title=找不到 cagent 可执行文件::Web UI 冒烟无法进行"
+            exit 1
+          fi
+          if ! python3 scripts/web_smoke.py "$EXE" > websmoke.log 2>&1; then
+            {
+              echo '### ❌ Web UI 冒烟失败'
+              echo '```'; tail -c 4000 websmoke.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 8 ] && break
+              echo "::error title=WebUI#$n::$line"
+            done < <(tail -12 websmoke.log)
+            exit 1
+          fi
+          cat websmoke.log
+          if ! python3 scripts/web_tool_smoke.py "$EXE" > webtoolsmoke.log 2>&1; then
+            {
+              echo '### ❌ Web UI 工具批准冒烟失败'
+              echo '```'; tail -c 4000 webtoolsmoke.log; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 8 ] && break
+              echo "::error title=WebUI工具#$n::$line"
+            done < <(tail -12 webtoolsmoke.log)
+            exit 1
+          fi
+          cat webtoolsmoke.log
+
       - name: 工具链指纹（失败时也打印）
         if: always()
         shell: bash
