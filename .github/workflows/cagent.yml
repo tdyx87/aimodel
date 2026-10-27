@@ -95,6 +95,7 @@ jobs:
 
   build-test:
     name: ${{ matrix.os }}
+    needs: [role-gates]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
