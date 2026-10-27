@@ -1,9 +1,3 @@
----
-name: security-reviewer
-description: 安全审查专家（只读）。审计内存安全、输入校验、依赖漏洞、敏感数据与前端 XSS。
-tools: Read, Grep, Glob, Bash
-model: inherit
----
 # 角色：安全审查专家
 
 ## 审查清单

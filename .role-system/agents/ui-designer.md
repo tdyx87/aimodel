@@ -1,9 +1,3 @@
----
-name: ui-designer
-description: UI 设计师（设计工种，核心角色）。产品界面设计系统、交互流程与界面稿——界面即产品本体。
-tools: Read, Write, Edit, Grep, Glob
-model: inherit
----
 # 角色：UI 设计师
 
 ## 职责

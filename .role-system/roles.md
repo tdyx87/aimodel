@@ -13,7 +13,7 @@
 ## 0. 设计原则
 
 1. **先角色，后 agent**：先定职责分工，再为每个角色写可执行 agent 文件。角色是"要做什么"的抽象，agent 是"怎么执行"的实现。
-2. **一个角色 = 一个 agent 文件**：agent 的 frontmatter（`tools`/`model`）落地角色的权限与能力约束。
+2. **角色正文与客户端注册分离**：`agents/<role>.md` 只写职责与交付要求；能力约束（能否写、能写哪、能否派发）写在 `manifest.json`，由生成器翻译成各客户端语法。**同一份事实源，多份生成物**，避免换客户端就失效。
 3. **职责不重叠**：每个角色有明确的"专属职责 + 移交规则"，防止多个 agent 抢做同一件事或互相推诿。
 4. **按工种拆分执行角色**：工具链/评审标准不同的工种必须独立设角色（见第 2 节）。
 5. **可裁剪**：小项目按需裁剪启用哪些 agent，角色设计保持完整（见第 6 节）。
@@ -172,12 +172,13 @@ PRD(用户故事) → 设计+契约(architect) + 界面稿(ui-designer)
 
 | 项 | 规则 |
 |----|------|
-| 文件位置 | 一个角色 = `agents/<role-name>.md`（本目录下） |
-| frontmatter | `name`（= 角色名）、`description`（一句话职责）、`tools`（最小权限）、`model` |
-| 工具权限 | 只读角色（reviewer/security-reviewer）不给 Write/Edit；写角色按工种目录授权 |
-| 实例化 | `spawn_agent`（一次性）或 `team_spawn_teammate`（长驻）；任务经 `team_task` 分配 |
+| 文件位置 | 一个角色 = `agents/<role-name>.md`（本目录下，**纯职责正文，无 frontmatter**） |
+| 能力声明 | `manifest.json`：`capability`（`read-only`/`read-write`/`dispatch`）+ `paths` 白名单 + `may_dispatch` |
+| 注册文件 | 由 `scripts/gen_agents.py` 生成 `.opencode/agents/<id>.md` 与 `.claude/agents/<id>.md`，**勿手改** |
+| 工具权限 | 只读角色禁止 edit（仅允许写审计）；写角色只在 `paths` 内可写 |
+| 实例化 | 按 `invocation.md`：`dispatch` → `await` → `collect`；无子代理时人工串行 |
 | 优先级 | 角色文件 → 本全局约束 → 运行时 rolePrompt → 具体任务指令（高层覆盖同名冲突字段） |
-| 活文档 | 验证有效的改进回写角色文件与本文档 |
+| 活文档 | 验证有效的改进回写角色文件、`manifest.json` 与本文档，再重新生成 |
 
 ---
 

@@ -1,9 +1,3 @@
----
-name: doc-engineer
-description: 文档工程师。面向用户的 README、用户手册、应用内帮助、FAQ、CHANGELOG——不用开发者行话。
-tools: Read, Write, Edit, Grep, Glob, Bash
-model: inherit
----
 # 角色：文档工程师
 
 ## 职责

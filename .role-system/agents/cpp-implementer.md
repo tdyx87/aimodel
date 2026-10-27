@@ -1,9 +1,3 @@
----
-name: cpp-implementer
-description: C++11 跨平台实现者（C++ 工种）。按契约在 product/src/ 与 product/include/ 编写可移植代码并附 GTest。
-tools: Read, Write, Edit, Grep, Glob, Bash
-model: inherit
----
 # 角色：C++ 实现者
 
 ## 职责

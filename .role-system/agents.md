@@ -21,14 +21,26 @@
 | 层 | 回答的问题 | 位置 |
 |----|-----------|------|
 | 第一层：角色设计 | 需要哪些**职责分工**？边界、输入输出、协作关系？ | `roles.md` |
-| 第二层：Agent 定义 | 每个角色如何**执行**？用什么工具、提示词、模型？ | `agents/*.md` |
+| 第二层：角色正文 | 每个角色具体做什么、边界在哪、怎么交付？ | `agents/*.md` |
+| 能力声明 | 每个角色能读/能写/能派发到什么程度？ | `manifest.json` |
+| 调用契约 | 派发、等待、交付的中性语义是什么？ | `invocation.md` |
 
 **为什么先角色**：
 1. 职责先于实现——避免造出职责重叠或真空的 agent；
 2. 角色稳定、可裁剪——小项目裁剪 agent 启用数量，不动角色设计；
 3. 按工种拆分——工具链/评审标准不同的工种必须分开（见 `roles.md` 第 2 节）。
 
-**映射规则**：一个角色 = 一个 agent 文件；agent 的 frontmatter（`tools`/`model`）实现角色的权限与能力约束。
+**映射规则（重要）**：角色正文是**纯文档**，任何客户端都不会自动发现它。
+真正的可执行注册文件由 `scripts/gen_agents.py` 从 `manifest.json` 生成：
+
+| 生成物 | 客户端 | 关键字段 |
+|--------|--------|---------|
+| `.opencode/agents/<id>.md` | OpenCode V2 | `description` / `mode` / `permissions` |
+| `.claude/agents/<id>.md` | Claude Code | `name` / `description` / `tools` / `model` |
+
+因此：**不要在 `agents/*.md` 里写 frontmatter**，也不要在生成物里手改。
+能力约束写在 `manifest.json`（`read-only` / `read-write` / `dispatch`），
+由生成器翻译成各客户端语法。换客户端只改生成器，事实源不动。
 
 ## 3. 目录结构
 
@@ -38,7 +50,14 @@
 ├─ .role-system/          ★ 不变层：换需求不动
 │   ├─ agents.md            # 方法论总纲（本文件）：两层架构、工程规范、编码风格
 │   ├─ roles.md             # 第一层：12 个角色的职责/边界/输入输出/协作
-│   └─ agents/*.md          # 第二层：12 个角色的可执行定义（frontmatter 约束 tools/model）
+│   ├─ agents/*.md          # 第二层：角色职责正文（纯文档，无客户端语法）
+│   ├─ manifest.json        # 角色清单 + 能力声明（含审计目录）
+│   └─ invocation.md        # 调用契约：派发/等待/交付 + 环境映射
+├─ scripts/
+│   ├─ gen_agents.py        # 生成客户端注册文件；--check 校验漂移
+│   └─ check_gates.py       # 审计门禁：代码有改动就必须有审计
+├─ .opencode/agents/*.md   ☆ 生成物（勿手改）
+├─ .claude/agents/*.md     ☆ 生成物（勿手改）
 └─ product/               ★ 变层：换需求就替换这一层
     ├─ README.md            # 面向用户的介绍（doc-engineer 维护）
     ├─ CMakeLists.txt       # 构建定义
@@ -110,6 +129,9 @@ PRD(用户故事) → 架构契约(architect) + 界面稿(ui-designer)
   - 下游角色开工前可质疑上游审计的「结论」，异议经 `orchestrator` 裁决；门禁放行以**复核通过**为准，而非仅凭审计存在。
   - 复核结论回写到被检审计的「复核」字段（谁、何时、通过/打回及原因）。
 - **模板**：`product/docs/audit/_template.md`（首次使用时复制改写）。
+- **机器校验**：`python scripts/check_gates.py` 检查命名与角色合法性；
+  `--diff <base>` 在代码有改动时要求同区间新增审计，并检查新增审计是否含
+  「输入 / 产出 / 结论 / 移交」四要素。CI 会执行，**跳过流程会失败而不是静默通过**。
 - 审计文档随 `product/` 走（用例产物），换需求时一并替换；但**规范本身**（本条）属不变层。
 
 ## 7. 工程规范（C++ 工种执行细则）

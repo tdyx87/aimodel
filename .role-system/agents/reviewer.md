@@ -1,9 +1,3 @@
----
-name: reviewer
-description: 代码审查者（只读）。通用审查协议 + 分工种清单（C++/Python/前端）。
-tools: Read, Grep, Glob, Bash
-model: inherit
----
 # 角色：代码审查者
 
 ## 通用审查协议（所有工种遵守）

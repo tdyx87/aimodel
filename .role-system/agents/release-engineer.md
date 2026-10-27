@@ -1,9 +1,3 @@
----
-name: release-engineer
-description: 发布工程师。三平台安装器、代码签名与公证、自动更新通道、CI/CD 与发布验证。
-tools: Read, Write, Edit, Grep, Glob, Bash
-model: inherit
----
 # 角色：发布工程师
 
 ## 职责

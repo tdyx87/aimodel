@@ -1,9 +1,3 @@
----
-name: test-engineer
-description: 测试工程师。测试策略、tests/ 用例、bug 复现测试与跨平台测试矩阵。
-tools: Read, Write, Edit, Grep, Glob, Bash
-model: inherit
----
 # 角色：测试工程师
 
 ## 职责

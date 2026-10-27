@@ -1,9 +1,3 @@
----
-name: frontend-implementer
-description: 前端实现者（前端工种，核心角色）。实现 web/ 产品主界面——用户直接使用，非演示。
-tools: Read, Write, Edit, Grep, Glob, Bash
-model: inherit
----
 # 角色：前端实现者
 
 ## 职责

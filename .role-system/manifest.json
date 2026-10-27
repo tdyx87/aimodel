@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "audit_dir": "product/docs/audit",
+  "roles": [
+    {
+      "id": "architect",
+      "title": "角色：系统架构师",
+      "description": "系统架构师。应用架构、模块接口契约、隐私架构（数据本地闭环）与技术选型。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/docs/design/**",
+        "product/docs/adr/**"
+      ]
+    },
+    {
+      "id": "cpp-implementer",
+      "title": "角色：C++ 实现者",
+      "description": "C++11 跨平台实现者（C++ 工种）。按契约在 product/src/ 与 product/include/ 编写可移植代码并附 GTest。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/src/**",
+        "product/include/**",
+        "product/tests/**"
+      ]
+    },
+    {
+      "id": "doc-engineer",
+      "title": "角色：文档工程师",
+      "description": "文档工程师。面向用户的 README、用户手册、应用内帮助、FAQ、CHANGELOG——不用开发者行话。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/README.md",
+        "product/docs/manual/**",
+        "product/CHANGELOG.md"
+      ]
+    },
+    {
+      "id": "frontend-implementer",
+      "title": "角色：前端实现者",
+      "description": "前端实现者（前端工种，核心角色）。实现 web/ 产品主界面——用户直接使用，非演示。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/web/**",
+        "product/design/**"
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "title": "角色：任务编排者",
+      "description": "任务编排者。拆解任务、按角色/工种分配、跟踪进度并收敛最终产出。",
+      "capability": "dispatch",
+      "mode": "all",
+      "may_dispatch": [
+        "product-manager",
+        "architect",
+        "ui-designer",
+        "cpp-implementer",
+        "python-implementer",
+        "frontend-implementer",
+        "reviewer",
+        "security-reviewer",
+        "test-engineer",
+        "doc-engineer",
+        "release-engineer"
+      ],
+      "paths": []
+    },
+    {
+      "id": "product-manager",
+      "title": "角色：产品经理",
+      "description": "产品经理。用户研究、PRD 与用户故事、可用性验收标准与里程碑规划。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/docs/prd/**"
+      ]
+    },
+    {
+      "id": "python-implementer",
+      "title": "角色：Python 实现者",
+      "description": "Python 实现者（Python 工种）。内部工具链：转换/处理/评测等脚本（用户不可见，用例定义具体内容），附 pytest 用例。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/python/**",
+        "product/scripts/**"
+      ]
+    },
+    {
+      "id": "release-engineer",
+      "title": "角色：发布工程师",
+      "description": "发布工程师。三平台安装器、代码签名与公证、自动更新通道、CI/CD 与发布验证。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/scripts/**",
+        ".github/workflows/**",
+        "product/packaging/**"
+      ]
+    },
+    {
+      "id": "reviewer",
+      "title": "角色：代码审查者",
+      "description": "代码审查者（只读）。通用审查协议 + 分工种清单（C++/Python/前端）。",
+      "capability": "read-only",
+      "mode": "subagent"
+    },
+    {
+      "id": "security-reviewer",
+      "title": "角色：安全审查专家",
+      "description": "安全审查专家（只读）。审计内存安全、输入校验、依赖漏洞、敏感数据与前端 XSS。",
+      "capability": "read-only",
+      "mode": "subagent"
+    },
+    {
+      "id": "test-engineer",
+      "title": "角色：测试工程师",
+      "description": "测试工程师。测试策略、tests/ 用例、bug 复现测试与跨平台测试矩阵。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/tests/**",
+        "product/scripts/**"
+      ]
+    },
+    {
+      "id": "ui-designer",
+      "title": "角色：UI 设计师",
+      "description": "UI 设计师（设计工种，核心角色）。产品界面设计系统、交互流程与界面稿——界面即产品本体。",
+      "capability": "read-write",
+      "mode": "subagent",
+      "paths": [
+        "product/design/**"
+      ]
+    }
+  ]
+}

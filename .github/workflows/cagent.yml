@@ -14,7 +14,7 @@ name: cagent-build
 
 on:
   push:
-    branches: ["feat/c-agent", "main"]
+    branches: ["feat/c-agent", "main", "fix/**"]
   pull_request:
   workflow_dispatch:
 
@@ -23,6 +23,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 角色门禁：不依赖模型，只检查「流程有没有留下痕迹」。
+  # 放在最前面，因为它最便宜——生成物漂移或改了代码却没审计，应立刻失败，
+  # 不必等三平台编译跑完。
+  role-gates:
+    name: 角色门禁
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 取源码（需要完整历史以计算区间）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 注册文件与 manifest 一致
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          if ! python3 scripts/gen_agents.py --check > genagents.log 2>&1; then
+            {
+              echo '### ❌ 角色注册文件与 `.role-system/manifest.json` 不一致'
+              echo '```'
+              cat genagents.log
+              echo '```'
+              echo '修复：`python scripts/gen_agents.py` 后提交生成物。'
+            } >> "$GITHUB_STEP_SUMMARY"
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 10 ] && break
+              echo "::error title=角色注册#$n::$line"
+            done < genagents.log
+            exit 1
+          fi
+          cat genagents.log
+
+      - name: 审计门禁
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          BASE=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -n "$BASE" ]; then
+            echo "区间基线：$BASE"
+            ARGS=(--verbose --diff "$BASE")
+          else
+            echo "无区间基线（手动触发），只做全量命名检查"
+            ARGS=(--verbose)
+          fi
+          if ! python3 scripts/check_gates.py "${ARGS[@]}" > gates.log 2>&1; then
+            {
+              echo '### ❌ 角色门禁未通过'
+              echo '```'
+              cat gates.log
+              echo '```'
+              echo '规范：`.role-system/agents.md` §6.6、`.role-system/invocation.md` §4'
+            } >> "$GITHUB_STEP_SUMMARY"
+            n=0
+            while IFS= read -r line; do
+              n=$((n + 1)); [ "$n" -gt 12 ] && break
+              echo "::error title=角色门禁#$n::$line"
+            done < gates.log
+            exit 1
+          fi
+          cat gates.log
+
   build-test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

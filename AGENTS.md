@@ -3,6 +3,11 @@
 > 本文件是**仓库入口**：先读这里，再按需进入两层。
 > 本仓库的主要目的是**角色系统本身**——`product/` 只是它的第一个用例。
 
+> **硬规则（路由）**：任何对 `product/` 的修改，都必须先经过 `orchestrator`
+> ——拆解任务、按角色执行、经四道门禁放行。单人模式下等价于「按 G1→G2→G3→G4
+> 依次扮演角色」，每换一个角色先读它的事实源，并在 `product/docs/audit/` 留审计。
+> **没有审计 = 该环节没有发生**，CI 会拦下。
+
 ---
 
 ## 这个仓库是什么
@@ -22,13 +27,24 @@ aimodel/
 ├─ .role-system/          ★ 不变层：换需求不动
 │   ├─ agents.md            # 方法论总纲：两层架构、目录约定、工程规范、编码风格
 │   ├─ roles.md             # 第一层：12 个角色的职责/边界/输入输出/协作
-│   └─ agents/*.md          # 第二层：12 个角色的可执行定义（frontmatter 约束 tools/model）
+│   ├─ agents/*.md          # 第二层：角色职责正文（纯文档，不含任何客户端语法）
+│   ├─ manifest.json        # 角色清单 + 能力声明（只读/可写/可派发 + 路径白名单）
+│   └─ invocation.md        # 调用契约：派发/等待/交付的中性语义
+├─ scripts/
+│   ├─ gen_agents.py        # 由 manifest 生成客户端 agent 注册文件
+│   └─ check_gates.py       # 审计门禁：代码有改动就必须有审计
+├─ .opencode/agents/*.md   ☆ 生成物：OpenCode V2 注册文件（勿手改）
+├─ .claude/agents/*.md     ☆ 生成物：Claude Code 注册文件（勿手改）
 └─ product/               ★ 变层：换需求就替换这一层
     ├─ README.md            # 面向用户的介绍（doc-engineer 维护）
     ├─ CMakeLists.txt       # 构建定义
     ├─ src/  include/  web/  design/  tests/  tools/  scripts/
     └─ docs/                # 需求与设计（prd/、design/）、审计（audit/）
 ```
+
+> 事实源只有 `.role-system/`。`.opencode/agents/` 与 `.claude/agents/` 是**生成物**，
+> 改角色请改 `agents/*.md` 或 `manifest.json`，然后运行 `python scripts/gen_agents.py`。
+
 
 ### 判断某处改动该进哪层
 
@@ -43,12 +59,19 @@ aimodel/
 
 ## 怎么用（两种模式）
 
-### 单人模式（当前）
+角色是否能被执行，取决于**是否注册到客户端**，而不是提示词写得多好。
+注册文件由 `scripts/gen_agents.py` 生成：OpenCode 读 `.opencode/agents/`，
+Claude Code 读 `.claude/agents/`。调用语义见 `.role-system/invocation.md`。
+
+### 多 agent 模式（推荐）
+`orchestrator` 拆任务，用客户端自带的子代理能力派发（OpenCode 是 `subagent`，
+Claude Code 是 `Task`），四道门禁按序放行。派发必须带「角色 / 任务 slug /
+输入路径 / 完成判据」，结束时回收「审计路径 / 裁决 / 产物」。
+
+### 单人模式（没有子代理时）
 一个会话先后扮演多个角色，但**结论格式不变**。典型顺序：
 `product-manager`（写 PRD）→ `architect`（出契约）+ `ui-designer`（出界面稿）→ 各工种实现 → `reviewer` → `test-engineer` → …→ `release-engineer`。
-
-### 多 agent 模式
-`orchestrator` 拆任务、按角色派发（`team_run_task` / `team_task`），四道门禁按序放行。
+每换一个角色前先读 `.role-system/agents/<role>.md`，结束时写审计。
 
 ---
 
@@ -64,6 +87,16 @@ aimodel/
 > 每个角色完成任务都要在 `product/docs/audit/` 留审计文档——它是门禁放行的凭证。审计**非自证**，须经 orchestrator 或下游角色抽检复核后才放行。完整规范见 `.role-system/agents.md` §6.6。
 
 完整角色定义、流水线、工程规范 → 见 `.role-system/agents.md` 与 `.role-system/roles.md`。
+
+### 自检命令（与模型无关）
+
+```bash
+python scripts/gen_agents.py --check        # 注册文件是否与 manifest 漂移
+python scripts/check_gates.py --verbose     # 历史审计命名/角色是否合法
+python scripts/check_gates.py --diff origin/main   # 改了代码却没新增审计 → 失败
+```
+
+CI 会跑前两条与区间检查。**跳过流程不会再「悄悄成功」**。
 
 ---
 

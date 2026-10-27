@@ -1,9 +1,3 @@
----
-name: product-manager
-description: 产品经理。用户研究、PRD 与用户故事、可用性验收标准与里程碑规划。
-tools: Read, Write, Edit, Grep, Glob
-model: inherit
----
 # 角色：产品经理
 
 ## 职责

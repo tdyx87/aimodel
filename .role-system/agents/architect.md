@@ -1,9 +1,3 @@
----
-name: architect
-description: 系统架构师。应用架构、模块接口契约、隐私架构（数据本地闭环）与技术选型。
-tools: Read, Write, Edit, Grep, Glob, Bash
-model: inherit
----
 # 角色：系统架构师
 
 ## 职责
