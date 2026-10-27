@@ -197,19 +197,6 @@ ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
 
 /* 把 api_base 拼成完整的请求地址（url_buf），供 ca_core_run_once 用。
  * 空串表示“不发请求”（Web 模式尚未配置）。 */
-static int core_rebuild_url(ca_core *c, const char *api_base) {
-    if (api_base == NULL || api_base[0] == '\0') {
-        c->url = NULL;
-        c->url_buf[0] = '\0';
-        return 0;
-    }
-    int n = snprintf(c->url_buf, sizeof(c->url_buf), "%s/chat/completions",
-                     api_base);
-    if (n <= 0 || (size_t)n >= sizeof(c->url_buf)) return -1;
-    c->url = c->url_buf;
-    return 0;
-}
-
 /* 运行时重配服务端地址 / 模型 / 密钥（Web UI 配置用）。
  *
  * 调用后下一轮 ca_core_run_once 会使用新的地址与密钥发请求。
