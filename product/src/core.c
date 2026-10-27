@@ -72,6 +72,19 @@ int ca_core_get_trace_raw(const ca_core *c) {
     return c->cfg.trace_raw ? 1 : 0;
 }
 
+static int core_rebuild_url(ca_core *c, const char *api_base) {
+    if (api_base == NULL || api_base[0] == '\0') {
+        c->url = NULL;
+        c->url_buf[0] = '\0';
+        return 0;
+    }
+    int n = snprintf(c->url_buf, sizeof(c->url_buf), "%s/chat/completions",
+                     api_base);
+    if (n <= 0 || (size_t)n >= sizeof(c->url_buf)) return -1;
+    c->url = c->url_buf;
+    return 0;
+}
+
 ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
     if (c == NULL || cfg == NULL) return CA_CORE_ERR_ARGS;
     if (cfg->transport == NULL || cfg->ui == NULL || cfg->ws == NULL) {
