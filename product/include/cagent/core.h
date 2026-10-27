@@ -158,6 +158,9 @@ typedef struct {
     const char *url;        /* 由 api_base 拼出并缓存 */
     char url_buf[512];
     char system_buf[4096];
+    /* 模型名拷贝：cfg.model 可能指向调用方的栈/环境变量，
+     * reconfig 时旧缓冲可能已释放，必须自己持有一份。 */
+    char model_buf[256];
     /* 预先拼好的 Authorization 头。空串表示不带鉴权。
      * 定长存放，且只在内存里存在——不打印、不落盘。 */
     char auth_header[CA_CORE_MAX_KEY_BYTES + 32];
@@ -218,7 +221,7 @@ typedef struct {
     const char *turn_user;  /* 本轮的用户输入（单轮模式的握手兜底用） */
     int saw_text;
     /* 本轮工具被**策略**拒绝（不是用户拒绝）：界面与回灌文案要区分。 */
-    int deny_by_policy;           /* 本轮是否有增量文本（决定要不要开流） */
+    int deny_by_policy;
     int saw_tool;           /* 本轮是否有工具调用 */
     char last_error[256];
 
@@ -235,6 +238,16 @@ const char *ca_core_status_text(ca_core_status s);
 /* 实际生效的请求体上限（钳制后）。测试与 UI 用它显示真实值。 */
 size_t ca_core_context_bytes(const ca_core *c);
 
+/* 运行时切换「打印模型输入输出」（调试用）。
+ *
+ * trace=1：打印请求体（历史淘汰后的最终版）和完整模型输出。
+ * trace_raw=1：额外逐帧打印原始 SSE（很嘈杂，默认关）。
+ * 这两个开关在任意时刻都能切换，不需要重启进程。 */
+void ca_core_set_trace(ca_core *c, int on);
+int  ca_core_get_trace(const ca_core *c);
+void ca_core_set_trace_raw(ca_core *c, int on);
+int  ca_core_get_trace_raw(const ca_core *c);
+
 /* 初始化。不发起任何网络请求。
  *
  * 前置条件：`c` 要么是全新内存，要么**先调过 ca_core_free**。
@@ -245,6 +258,17 @@ ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg);
 
 /* 释放 init 分配的资源。可重复调用；不释放 cfg 里由调用方持有的指针。 */
 void ca_core_free(ca_core *c);
+
+/* 运行时重配服务端地址 / 模型 / 密钥（Web UI 配置用）。
+ *
+ * 调用后下一轮 ca_core_run_once 会使用新的地址与密钥发请求。
+ * 会话历史、传输层、权限策略等保持不变。
+ *
+ * api_base 为 NULL 或空串时不改；model 为 NULL 或空串时不改；
+ * api_key 为 NULL 时不改（这样可以只改模型而不改密钥）。
+ * 返回 0 成功；-1 参数非法（c 为 NULL）。 */
+int ca_core_reconfig(ca_core *c, const char *api_base, const char *model,
+                     const char *api_key);
 
 /* 处理一次用户输入，含完整的工具执行循环。
  *

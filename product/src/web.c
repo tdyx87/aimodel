@@ -73,6 +73,13 @@ struct ca_web {
     int approval_ready; /* 0=没有 1=有决定 */
     int approval_allow;
 
+    /* 运行时重配（Web 配置面板用）：
+     * 由外部（main.c）设置，调用 ca_core_reconfig 把 URL/模型/密钥
+     * 写进 ca_core。为 NULL 时 /api/config 返回 501。 */
+    void (*on_config)(const char *api_base, const char *model,
+                      const char *api_key, void *user);
+    void *config_user;
+
     ca_net_mutex lock;
     ca_net_cond queue_cond;
     ca_net_cond approval_cond;
@@ -663,6 +670,36 @@ static void conn_thread(void *p) {
                           "{\"ok\":true}", 11, 0);
             }
         }
+    } else if (strcmp(req.method, "POST") == 0 &&
+               strcmp(req.path, "/api/config") == 0) {
+        if (!host_ok(w, &req) || !token_ok(w, &req)) {
+            http_send(fd, "401 Unauthorized", "text/plain; charset=utf-8",
+                      "unauthorized", 12, 0);
+        } else if (w->on_config == NULL) {
+            http_send(fd, "501 Not Implemented", "text/plain; charset=utf-8",
+                      "config not supported", 19, 0);
+        } else {
+            char api_base[256] = {0};
+            char model[256] = {0};
+            char api_key[512] = {0};
+            int have_base = json_get_string(body, "api_base", api_base,
+                                            sizeof(api_base)) == 0;
+            int have_model = json_get_string(body, "model", model,
+                                             sizeof(model)) == 0;
+            int have_key = json_get_string(body, "api_key", api_key,
+                                           sizeof(api_key)) == 0;
+            if (!have_base && !have_model && !have_key) {
+                http_send(fd, "400 Bad Request", "text/plain; charset=utf-8",
+                          "need api_base/model/api_key", 26, 0);
+            } else {
+                w->on_config(have_base ? api_base : NULL,
+                             have_model ? model : NULL,
+                             have_key ? api_key : NULL,
+                             w->config_user);
+                http_send(fd, "200 OK", "application/json; charset=utf-8",
+                          "{\"ok\":true}", 11, 0);
+            }
+        }
     } else {
         http_send(fd, "404 Not Found", "text/plain; charset=utf-8", "not found",
                   9, 0);
@@ -778,3 +815,14 @@ void ca_web_stop(ca_web *w) {
 const char *ca_web_url(const ca_web *w) { return (w != NULL) ? w->url : ""; }
 const char *ca_web_token(const ca_web *w) { return (w != NULL) ? w->token : ""; }
 int ca_web_port(const ca_web *w) { return (w != NULL) ? w->port : 0; }
+
+void ca_web_set_config_cb(ca_web *w,
+                          void (*on_config)(const char *api_base,
+                                            const char *model,
+                                            const char *api_key,
+                                            void *user),
+                          void *user) {
+    if (w == NULL) return;
+    w->on_config = on_config;
+    w->config_user = user;
+}

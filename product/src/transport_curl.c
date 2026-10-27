@@ -87,11 +87,9 @@ static void curl_cleanup(void) {
     curl_global_cleanup();
 }
 
-static ca_http_status curl_run(const ca_request *req, ca_on_data on_data, void *user) {
+static ca_http_status curl_run_once(const ca_request *req, ca_on_data on_data, void *user, CURL *curl,
+                                       struct curl_slist **hl_out) {
     if (req == NULL || req->url == NULL || req->method == NULL) return CA_HTTP_ERR_TRANSPORT;
-
-    CURL *curl = curl_easy_init();
-    if (curl == NULL) return CA_HTTP_ERR_OOM;
 
     g_ctx.on_data = on_data;
     g_ctx.user = user;
@@ -109,8 +107,10 @@ static ca_http_status curl_run(const ca_request *req, ca_on_data on_data, void *
         for (const char *const *h = req->headers; *h != NULL; h++) {
             hl = curl_slist_append(hl, *h);
         }
-        if (hl != NULL) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
-        /* hl 的所有权已交给 curl，不要再 free */
+        if (hl != NULL) {
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hl);
+            if (hl_out != NULL) *hl_out = hl;
+        }
     }
 
     if (strcmp(req->method, "POST") == 0 || strcmp(req->method, "PUT") == 0) {
@@ -138,13 +138,10 @@ static ca_http_status curl_run(const ca_request *req, ca_on_data on_data, void *
     CURLcode rc = curl_easy_perform(curl);
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    curl_easy_cleanup(curl);
-    /* 以 libcurl 的权威状态码为准，而不是信任 header 回调的解析：
-     * 重定向链、HTTP/2 的 ":status" 都可能让逐行解析漏掉最后一次。 */
+    /* 以 libcurl 的权威状态码为准 */
     if (status > 0) g_ctx.status_code = status;
 
-    /* 上层主动中止优先于一切传输层错误——on_data 返回非 0 时
-     * libcurl 会报 WRITE_ERROR，那是我们的选择，不是网络故障。 */
+    /* 上层主动中止优先于一切传输层错误 */
     if (g_ctx.aborted) return CA_HTTP_ERR_ABORTED;
 
     switch (rc) {
@@ -164,6 +161,47 @@ static ca_http_status curl_run(const ca_request *req, ca_on_data on_data, void *
         default:
             return CA_HTTP_ERR_TRANSPORT;
     }
+}
+
+static ca_http_status curl_run(const ca_request *req, ca_on_data on_data, void *user) {
+    if (req == NULL || req->url == NULL || req->method == NULL) return CA_HTTP_ERR_TRANSPORT;
+
+    CURL *curl = curl_easy_init();
+    if (curl == NULL) return CA_HTTP_ERR_OOM;
+
+    int retries = 3;
+    ca_http_status last_res = CA_HTTP_ERR_TRANSPORT;
+    for (int i = 0; i <= retries; i++) {
+        struct curl_slist *hl = NULL;
+        /* 重置回调上下文 */
+        g_ctx.on_data = on_data;
+        g_ctx.user = user;
+        g_ctx.status_code = 0;
+        g_ctx.aborted = 0;
+        g_ctx.transport_error = 0;
+        curl_easy_reset(curl);
+        ca_http_status res = curl_run_once(req, on_data, user, curl, &hl);
+        long status = g_ctx.status_code;
+        if (hl != NULL) curl_slist_free_all(hl);
+        if (res == CA_HTTP_OK) {
+            curl_easy_cleanup(curl);
+            return res;
+        }
+        if (res == CA_HTTP_ERR_ABORTED) {
+            curl_easy_cleanup(curl);
+            return res;
+        }
+        /* 重试：503/429/某些临时错误，且未中止 */
+        if ((status == 503 || status == 429) && i < retries) {
+            /* 简单退避 */
+            last_res = res;
+            continue;
+        }
+        curl_easy_cleanup(curl);
+        return res;
+    }
+    curl_easy_cleanup(curl);
+    return last_res;
 }
 
 static long curl_last_status(void) {

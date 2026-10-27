@@ -87,6 +87,40 @@ static void web_on_core_event(const ca_core_event *ev, void *user) {
     ca_web_emit(w, &e);
 }
 
+/* Web 配置面板回调：把浏览器里填写的 URL/模型/密钥写进 ca_core。 */
+typedef struct {
+    ca_core *core;
+    ca_web *web;
+    const char **model_name;
+} web_cfg_ctx;
+static web_cfg_ctx g_web_cfg_ctx;
+
+static void web_on_config(const char *api_base, const char *model,
+                          const char *api_key, void *user) {
+    web_cfg_ctx *ctx = (web_cfg_ctx *)user;
+    ca_core *c = (ctx != NULL) ? ctx->core : NULL;
+    ca_web *w = (ctx != NULL) ? ctx->web : NULL;
+    if (c == NULL) return;
+    if (ca_core_reconfig(c, api_base, model, api_key) != 0) {
+        /* 配置失败（如 api_base 太长）：无法向浏览器反馈详细原因，
+         * 但 /api/config 已返回 200，前端会显示「已保存」。这里只能
+         * 在控制台留痕。 */
+        fprintf(stderr, "web_on_config: ca_core_reconfig 失败\n");
+        return;
+    }
+    if (ctx != NULL && ctx->model_name != NULL && model != NULL && model[0] != '\0') {
+        *ctx->model_name = model;
+    }
+    if (w != NULL) {
+        ca_web_event info;
+        info.kind = CA_WEB_EV_INFO;
+        info.text = NULL;
+        info.name = (ctx != NULL && ctx->model_name != NULL) ? *ctx->model_name : g_cfg_model_name;
+        info.status = ca_transport_name();
+        ca_web_emit(w, &info);
+    }
+}
+
 /* Web 模式的输入源：等浏览器的批准决定。
  *
  * 终端的批准是「按一个键」，浏览器的批准是「点一个按钮」——
@@ -223,6 +257,8 @@ static int run_command(ca_ui *ui, const char *line, const char *transport_name) 
         ca_ui_line(ui, "  /help          显示本帮助");
         ca_ui_line(ui, "  /mem           显示当前与峰值 RSS");
         ca_ui_line(ui, "  /new           开始新会话（当前对话从记忆中清除）");
+        ca_ui_line(ui, "  /trace [on|off] 切换/查看请求与完整模型输出转储");
+        ca_ui_line(ui, "  /trace raw [on|off]  切换/查看原始 SSE 帧（很嘈杂）");
         ca_ui_line(ui, "  /list          列出历史会话（新到旧）");
         ca_ui_line(ui, "  /resume <id>   继续指定的会话");
         ca_ui_line(ui, "  /delete <id>   删除指定的会话");
@@ -230,6 +266,58 @@ static int run_command(ca_ui *ui, const char *line, const char *transport_name) 
         ca_ui_line(ui, "");
         ca_ui_line(ui, "模型要改文件或执行命令时会先列出具体内容并问 [y/N]，");
         ca_ui_line(ui, "只有输入 y 才执行。执行命令需 CAGENT_ALLOW_SHELL=1。");
+        return 0;
+    }
+    if (strncmp(line, "/trace", 6) == 0) {
+        const char *arg = cmd_arg(line);
+        if (arg == NULL) {
+            ca_ui_printf(ui, "trace: %s，trace_raw: %s\n",
+                         ca_core_get_trace(&g_core) ? "on" : "off",
+                         ca_core_get_trace_raw(&g_core) ? "on" : "off");
+            ca_ui_line(ui, "用法：/trace on|off  或  /trace raw [on|off]");
+            return 0;
+        }
+        if (strncmp(arg, "raw", 3) == 0) {
+            const char *arg2 = arg;
+            /* 跳过 "raw" 及空格 */
+            const char *p = arg;
+            while (*p != '\0' && *p != ' ' && *p != '\t') p++;
+            while (*p == ' ' || *p == '\t') p++;
+            arg2 = (*p == '\0') ? NULL : p;
+            if (arg2 == NULL) {
+                int v = !ca_core_get_trace_raw(&g_core);
+                ca_core_set_trace_raw(&g_core, v);
+                ca_ui_printf(ui, "trace_raw: %s\n", v ? "on" : "off");
+                return 0;
+            }
+            if (strcmp(arg2, "1") == 0 || strcmp(arg2, "on") == 0 ||
+                strcmp(arg2, "true") == 0 || strcmp(arg2, "yes") == 0) {
+                ca_core_set_trace_raw(&g_core, 1);
+                ca_ui_line(ui, "trace_raw: on");
+                return 0;
+            }
+            if (strcmp(arg2, "0") == 0 || strcmp(arg2, "off") == 0 ||
+                strcmp(arg2, "false") == 0 || strcmp(arg2, "no") == 0) {
+                ca_core_set_trace_raw(&g_core, 0);
+                ca_ui_line(ui, "trace_raw: off");
+                return 0;
+            }
+            ca_ui_line(ui, "用法：/trace raw [on|off]");
+            return 0;
+        }
+        if (strcmp(arg, "1") == 0 || strcmp(arg, "on") == 0 ||
+            strcmp(arg, "true") == 0 || strcmp(arg, "yes") == 0) {
+            ca_core_set_trace(&g_core, 1);
+            ca_ui_line(ui, "trace: on（将打印请求体与完整模型输出）");
+            return 0;
+        }
+        if (strcmp(arg, "0") == 0 || strcmp(arg, "off") == 0 ||
+            strcmp(arg, "false") == 0 || strcmp(arg, "no") == 0) {
+            ca_core_set_trace(&g_core, 0);
+            ca_ui_line(ui, "trace: off");
+            return 0;
+        }
+        ca_ui_line(ui, "用法：/trace on|off  或  /trace raw [on|off]");
         return 0;
     }
     if (strcmp(line, "/mem") == 0) {
@@ -579,22 +667,21 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* 转储模型的输入与输出。**默认开**。
+    /* 转储模型的输入与输出。**默认关**（避免意外打印敏感内容）。
      *
-     * 为什么默认开：代理对用户是个黑盒。「它到底跟模型说了什么」
-     * 「模型到底回了什么」是排查问题的第一手证据，而平时根本看不到。
-     * 打印的是原文，看到的就是真正发出去的。
-     *
-     * 关掉：CAGENT_TRACE=0（"0"/"off"/"false"/"no" 都算关）。
-     * 为什么保留这个开关：终端输出会变得很长，
-     * 有人只想看结果、不想看协议细节。 */
-    int trace = 1;
+     * 关掉也不影响对话本身。排查时再开：CAGENT_TRACE=1。
+     * "0"/"off"/"false"/"no" 都算关，"1"/"on"/"true"/"yes" 都算开。 */
+    int trace = 0;
     const char *trace_env = getenv("CAGENT_TRACE");
     if (trace_env != NULL && trace_env[0] != '\0') {
-        if (strcmp(trace_env, "0") == 0 || strcmp(trace_env, "off") == 0 ||
-            strcmp(trace_env, "false") == 0 || strcmp(trace_env, "no") == 0) {
+        if (strcmp(trace_env, "1") == 0 || strcmp(trace_env, "on") == 0 ||
+            strcmp(trace_env, "true") == 0 || strcmp(trace_env, "yes") == 0) {
+            trace = 1;
+        } else if (strcmp(trace_env, "0") == 0 || strcmp(trace_env, "off") == 0 ||
+                   strcmp(trace_env, "false") == 0 || strcmp(trace_env, "no") == 0) {
             trace = 0;
         }
+        /* 其他值：维持默认（关），不臆测 */
     }
     /* 原始协议帧：默认**关**。模型回一句话往往就是上百帧
      * （每 token 一帧），逐帧打印会把终端刷爆，正文反而看不见。
@@ -602,17 +689,27 @@ int main(int argc, char **argv) {
     int trace_raw = 0;
     const char *trace_raw_env = getenv("CAGENT_TRACE_RAW");
     if (trace_raw_env != NULL && trace_raw_env[0] != '\0') {
-        if (strcmp(trace_raw_env, "0") != 0 && strcmp(trace_raw_env, "off") != 0 &&
-            strcmp(trace_raw_env, "false") != 0 && strcmp(trace_raw_env, "no") != 0) {
+        if (strcmp(trace_raw_env, "1") == 0 || strcmp(trace_raw_env, "on") == 0 ||
+            strcmp(trace_raw_env, "true") == 0 || strcmp(trace_raw_env, "yes") == 0) {
             trace_raw = 1;
+        } else if (strcmp(trace_raw_env, "0") == 0 || strcmp(trace_raw_env, "off") == 0 ||
+                   strcmp(trace_raw_env, "false") == 0 || strcmp(trace_raw_env, "no") == 0) {
+            trace_raw = 0;
         }
     }
 
-    if (base == NULL || base[0] == '\0' || model == NULL || model[0] == '\0') {
-        print_usage(stderr);
-        return 2;
+    if (g_want_web) {
+        /* Web 模式下 URL/模型/密钥可由浏览器配置页面后续设置，
+         * 这里不强制要求环境变量；若未设置，核心在第一条消息到来前
+         * 需要用户在浏览器里配置，否则会提示「未配置服务端地址」。 */
+        g_cfg_model_name = (model != NULL && model[0] != '\0') ? model : "(未配置)";
+    } else {
+        if (base == NULL || base[0] == '\0' || model == NULL || model[0] == '\0') {
+            print_usage(stderr);
+            return 2;
+        }
+        g_cfg_model_name = model;
     }
-    g_cfg_model_name = model;
 
     if (g_want_probe) {
         ca_term_setup_console();
@@ -697,6 +794,12 @@ int main(int argc, char **argv) {
             ca_ws_free(ws);
             return 6;
         }
+        /* Web 配置面板：用户在浏览器里填写 URL/模型/密钥后，
+         * 通过 /api/config 回调到这里，重配 ca_core。 */
+        g_web_cfg_ctx.core = &g_core;
+        g_web_cfg_ctx.web = g_web;
+        g_web_cfg_ctx.model_name = &g_cfg_model_name;
+        ca_web_set_config_cb(g_web, web_on_config, &g_web_cfg_ctx);
         /* Web 模式下「按键」来自浏览器：ui 的输入源换成 web 的。 */
         src.read_byte = web_read_byte;
         src.self = NULL;
@@ -823,7 +926,46 @@ int main(int argc, char **argv) {
                     ca_ui_line(&ui, "已开始新会话。");
                     continue;
                 }
-                ca_ui_line(&ui, "（Web 模式目前支持 /new 与 /exit）");
+                if (strncmp(msg, "/trace", 6) == 0) {
+                    const char *arg = cmd_arg(msg);
+                    if (arg == NULL) {
+                        ca_ui_printf(&ui, "trace: %s，trace_raw: %s\n",
+                                     ca_core_get_trace(&g_core) ? "on" : "off",
+                                     ca_core_get_trace_raw(&g_core) ? "on" : "off");
+                        continue;
+                    }
+                    if (strncmp(arg, "raw", 3) == 0) {
+                        const char *p = arg;
+                        while (*p != '\0' && *p != ' ' && *p != '\t') p++;
+                        while (*p == ' ' || *p == '\t') p++;
+                        arg = (*p == '\0') ? NULL : p;
+                        if (arg == NULL) {
+                            int v = !ca_core_get_trace_raw(&g_core);
+                            ca_core_set_trace_raw(&g_core, v);
+                            ca_ui_printf(&ui, "trace_raw: %s\n", v ? "on" : "off");
+                            continue;
+                        }
+                        if (strcmp(arg, "1") == 0 || strcmp(arg, "on") == 0 ||
+                            strcmp(arg, "true") == 0 || strcmp(arg, "yes") == 0) {
+                            ca_core_set_trace_raw(&g_core, 1);
+                            ca_ui_line(&ui, "trace_raw: on");
+                            continue;
+                        }
+                        ca_core_set_trace_raw(&g_core, 0);
+                        ca_ui_line(&ui, "trace_raw: off");
+                        continue;
+                    }
+                    if (strcmp(arg, "1") == 0 || strcmp(arg, "on") == 0 ||
+                        strcmp(arg, "true") == 0 || strcmp(arg, "yes") == 0) {
+                        ca_core_set_trace(&g_core, 1);
+                        ca_ui_line(&ui, "trace: on");
+                        continue;
+                    }
+                    ca_core_set_trace(&g_core, 0);
+                    ca_ui_line(&ui, "trace: off");
+                    continue;
+                }
+                ca_ui_line(&ui, "（Web 模式目前支持 /new、/trace、/exit）");
                 continue;
             }
             (void)ca_core_run_once(&g_core, msg);

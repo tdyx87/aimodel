@@ -61,6 +61,16 @@ void ca_web_emit(ca_web *w, const ca_web_event *ev);
 /* 用户消息：浏览器 → 代理。返回 0 成功。 */
 int  ca_web_push_user(ca_web *w, const char *text);
 
+/* 设置运行时重配回调。用户在浏览器配置面板里填写 URL/模型/密钥并
+ * 保存后，通过 /api/config 触发此回调，由外部（main.c）把新配置
+ * 写进 ca_core（ca_core_reconfig）。为 NULL 时 /api/config 返回 501。 */
+void ca_web_set_config_cb(ca_web *w,
+                          void (*on_config)(const char *api_base,
+                                            const char *model,
+                                            const char *api_key,
+                                            void *user),
+                          void *user);
+
 /* 取一条用户消息。返回 1=有消息，0=超时，-1=服务已停止。 */
 int  ca_web_pop_user(ca_web *w, char *buf, size_t cap, int timeout_ms);
 

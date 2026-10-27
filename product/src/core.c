@@ -52,22 +52,33 @@ void ca_core_free(ca_core *c) {
     c->body_cap = 0;
 }
 
+void ca_core_set_trace(ca_core *c, int on) {
+    if (c == NULL) return;
+    c->cfg.trace = on ? 1 : 0;
+}
+
+int ca_core_get_trace(const ca_core *c) {
+    if (c == NULL) return 0;
+    return c->cfg.trace ? 1 : 0;
+}
+
+void ca_core_set_trace_raw(ca_core *c, int on) {
+    if (c == NULL) return;
+    c->cfg.trace_raw = on ? 1 : 0;
+}
+
+int ca_core_get_trace_raw(const ca_core *c) {
+    if (c == NULL) return 0;
+    return c->cfg.trace_raw ? 1 : 0;
+}
+
 ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
     if (c == NULL || cfg == NULL) return CA_CORE_ERR_ARGS;
-    if (cfg->transport == NULL || cfg->api_base == NULL || cfg->model == NULL ||
-        cfg->ui == NULL || cfg->ws == NULL) {
+    if (cfg->transport == NULL || cfg->ui == NULL || cfg->ws == NULL) {
         return CA_CORE_ERR_ARGS;
     }
     memset(c, 0, sizeof(*c));
     c->cfg = *cfg;
-
-    int n = snprintf(c->url_buf, sizeof(c->url_buf), "%s/chat/completions",
-                     cfg->api_base);
-    if (n <= 0 || (size_t)n >= sizeof(c->url_buf)) {
-        core_note(c, "api_base 太长");
-        return CA_CORE_ERR_ARGS;
-    }
-    c->url = c->url_buf;
 
     /* 系统提示拷进定长缓冲：调用方释放之后不留悬垂指针。
      * 这类悬垂在测试里往往不复现，在长时间运行的进程里会。 */
@@ -102,6 +113,24 @@ ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
             core_note(c, "API key 过长");
             return CA_CORE_ERR_ARGS;
         }
+    }
+
+    /* Web 模式下 api_base/model 可先为空，由 /api/config 后续设置；
+     * 非 Web 模式下两者必填，否则无从发请求。 */
+    if (cfg->api_base != NULL && cfg->api_base[0] != '\0') {
+        if (core_rebuild_url(c, cfg->api_base) != 0) {
+            core_note(c, "api_base 太长");
+            return CA_CORE_ERR_ARGS;
+        }
+    }
+    if (cfg->model != NULL && cfg->model[0] != '\0') {
+        size_t n = strlen(cfg->model);
+        if (n >= sizeof(c->model_buf)) {
+            core_note(c, "模型名过长");
+            return CA_CORE_ERR_ARGS;
+        }
+        memcpy(c->model_buf, cfg->model, n + 1);
+        c->cfg.model = c->model_buf;
     }
 
     /* 请求体缓冲放在**所有校验之后**：这样失败路径不会留下已分配的
@@ -151,6 +180,60 @@ ca_core_status ca_core_init(ca_core *c, const ca_core_config *cfg) {
         }
     }
     return CA_CORE_OK;
+}
+
+/* 把 api_base 拼成完整的请求地址（url_buf），供 ca_core_run_once 用。
+ * 空串表示“不发请求”（Web 模式尚未配置）。 */
+static int core_rebuild_url(ca_core *c, const char *api_base) {
+    if (api_base == NULL || api_base[0] == '\0') {
+        c->url = NULL;
+        c->url_buf[0] = '\0';
+        return 0;
+    }
+    int n = snprintf(c->url_buf, sizeof(c->url_buf), "%s/chat/completions",
+                     api_base);
+    if (n <= 0 || (size_t)n >= sizeof(c->url_buf)) return -1;
+    c->url = c->url_buf;
+    return 0;
+}
+
+/* 运行时重配服务端地址 / 模型 / 密钥（Web UI 配置用）。
+ *
+ * 调用后下一轮 ca_core_run_once 会使用新的地址与密钥发请求。
+ * 会话历史、传输层、权限策略等保持不变。
+ *
+ * api_base 为 NULL 或空串时不改 url；model 为 NULL 或空串时不改模型；
+ * api_key 为 NULL 时不改鉴权头（这样可以只改模型而不改密钥）。
+ *
+ * 返回 0 成功；-1 参数非法（c 为 NULL 或 api_base 太长）。 */
+int ca_core_reconfig(ca_core *c, const char *api_base, const char *model,
+                     const char *api_key) {
+    if (c == NULL) return -1;
+
+    if (api_base != NULL && api_base[0] != '\0') {
+        if (core_rebuild_url(c, api_base) != 0) return -1;
+        c->cfg.api_base = c->url_buf; /* 指向自己持有的缓冲，避免悬垂 */
+    }
+
+    if (model != NULL && model[0] != '\0') {
+        size_t n = strlen(model);
+        if (n >= sizeof(c->model_buf)) return -1;
+        memcpy(c->model_buf, model, n + 1);
+        c->cfg.model = c->model_buf;
+    }
+
+    if (api_key != NULL && api_key[0] != '\0') {
+        size_t kn = strlen(api_key);
+        if (kn > CA_CORE_MAX_KEY_BYTES) return -1;
+        int an = snprintf(c->auth_header, sizeof(c->auth_header),
+                          "Authorization: Bearer %s", api_key);
+        if (an <= 0 || (size_t)an >= sizeof(c->auth_header)) return -1;
+    } else if (api_key != NULL && api_key[0] == '\0') {
+        /* 显式传空串：取消鉴权。 */
+        c->auth_header[0] = '\0';
+    }
+
+    return 0;
 }
 
 /* ---- 一次请求-响应 ---- */
@@ -580,6 +663,14 @@ static ca_core_status core_one_turn(ca_core *c, const char *user_text,
 
     /* 光标先在「等待响应」上，收到第一段输出时自动让位（仅 TTY）。
      * 管道/重定向下两者都是空操作，输出照样能被脚本消费。 */
+    /* Web 模式下尚未配置服务端地址时，url 为 NULL：
+     * 不得发请求，返回明确错误，提示用户先在 Web UI 设置。 */
+    if (c->url == NULL) {
+        ca_ui_wait_end(c->cfg.ui);
+        core_note(c, "未配置服务端地址：请在 Web UI 的设置里填写 URL、模型与密钥后再发送消息");
+        return CA_CORE_ERR_ARGS;
+    }
+
     ca_ui_wait_begin(c->cfg.ui);
     ca_http_status hs = c->cfg.transport->run(&hreq, on_data, &t);
     ca_ui_wait_end(c->cfg.ui);
@@ -989,10 +1080,18 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
         for (int i = 0; i < c->slot_count; i++) {
             const ca_llm_tool_slot *s = &c->slots[i];
 
-            /* 参数超限时**拒绝执行**：执行半截参数等于做模型没要求的事。 */
+            /* 参数超限时**拒绝执行**：执行半截参数等于做模型没要求的事。
+             * 必须补一条 tool 结果回灌，否则模型会反复用同一个调用重试。 */
             if (s->args_overflow) {
                 ca_ui_line(c->cfg.ui, "工具参数超过上限，已拒绝执行。");
                 denied = 1;
+                int mi = tool_msg_begin(c, s->id);
+                if (mi >= 0) {
+                    tool_msg_append(c, (size_t)mi,
+                                    "<result status=\"error\" error=\"参数超过上限\">"
+                                    "工具参数超过上限，已拒绝执行。</result>");
+                    tool_msg_append_notice(c, (size_t)mi, s->name, CA_TOOL_DENIED);
+                }
                 continue;
             }
             if (s->args_len == 0 || s->name[0] == '\0') continue;
@@ -1069,6 +1168,7 @@ ca_core_status ca_core_run_once(ca_core *c, const char *user_input) {
          * 就退回「结束本轮」，绝不发一条没有对应调用的 tool 结果——
          * 服务端会因缺 tool_calls 而 400，而界面上只看到「请求失败」。 */
         if (build_replay_tool_calls(c) != 0) {
+            ca_ui_line(c->cfg.ui, "（工具回灌失败：无法生成 tool_calls，跳过本轮回带）");
             return denied ? CA_CORE_ERR_DENIED : CA_CORE_OK;
         }
         c->replay_open = 1;
